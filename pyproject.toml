@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distributed-computing-project"
+version = "0.1.0"
+description = "Simulation framework for studying causal consistency under membership churn."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Pallavi Desai" },
+  { name = "Eric Nelson" },
+]
+dependencies = []
+
