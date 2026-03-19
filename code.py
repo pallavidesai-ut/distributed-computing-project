@@ -47,16 +47,24 @@ class Environment:
 
 class BaseClock(ABC):
     @abstractmethod
-    def local_event(self, node_id: str) -> None:
+    def local_event(self, node_id: str, now: float) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def prepare_send(self, node_id: str) -> dict[str, Any]:
+    def prepare_send(self, node_id: str, now: float) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
-    def update_on_receive(self, node_id: str, metadata: dict[str, Any]) -> bool:
+    def update_on_receive(
+        self,
+        node_id: str,
+        metadata: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, bool]:
         raise NotImplementedError
+
+    def prune_expired(self, now: float) -> set[str]:
+        return set()
 
     @abstractmethod
     def metadata_size(self) -> int:
@@ -79,14 +87,19 @@ class VectorClock(BaseClock):
         if initial:
             self.vc.update(initial)
 
-    def local_event(self, node_id: str) -> None:
+    def local_event(self, node_id: str, now: float) -> None:
         self.vc[node_id] += 1
 
-    def prepare_send(self, node_id: str) -> dict[str, Any]:
-        self.local_event(node_id)
+    def prepare_send(self, node_id: str, now: float) -> dict[str, Any]:
+        self.local_event(node_id, now)
         return dict(self.vc)
 
-    def update_on_receive(self, node_id: str, metadata: dict[str, Any]) -> bool:
+    def update_on_receive(
+        self,
+        node_id: str,
+        metadata: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, bool]:
         sender = metadata.get("__sender__")
         for key, value in metadata.items():
             if key == "__sender__":
@@ -94,14 +107,14 @@ class VectorClock(BaseClock):
             local_value = self.vc.get(key, 0)
             if key == sender:
                 if value != local_value + 1:
-                    return False
+                    return False, False
             elif value > local_value:
-                return False
+                return False, False
 
         for key, value in metadata.items():
             if key != "__sender__":
                 self.vc[key] = max(self.vc.get(key, 0), value)
-        return True
+        return True, False
 
     def metadata_size(self) -> int:
         return len(self.vc)
@@ -121,11 +134,11 @@ class DottedVersionVectorClock(BaseClock):
         if initial:
             self.summary.update(initial)
 
-    def local_event(self, node_id: str) -> None:
+    def local_event(self, node_id: str, now: float) -> None:
         self.summary[node_id] += 1
 
-    def prepare_send(self, node_id: str) -> dict[str, Any]:
-        self.local_event(node_id)
+    def prepare_send(self, node_id: str, now: float) -> dict[str, Any]:
+        self.local_event(node_id, now)
         context = {
             key: value for key, value in self.summary.items() if key != node_id
         }
@@ -136,36 +149,41 @@ class DottedVersionVectorClock(BaseClock):
             "__dot__": dot,
         }
 
-    def update_on_receive(self, node_id: str, metadata: dict[str, Any]) -> bool:
+    def update_on_receive(
+        self,
+        node_id: str,
+        metadata: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, bool]:
         summary = metadata.get("__summary__")
         dot = metadata.get("__dot__")
         sender = metadata.get("__sender__")
 
         if not isinstance(summary, dict) or not isinstance(dot, (tuple, list)) or len(dot) != 2:
-            return False
+            return False, False
 
         dot_node, dot_counter = dot
         if sender is None:
             sender = dot_node
         if dot_node != sender:
-            return False
+            return False, False
         if not isinstance(dot_counter, int):
-            return False
+            return False, False
 
         for key, value in summary.items():
             if not isinstance(value, int):
-                return False
+                return False, False
             local_value = self.summary.get(key, 0)
             if value > local_value:
-                return False
+                return False, False
 
         if self.summary.get(sender, 0) != dot_counter - 1:
-            return False
+            return False, False
 
         for key, value in summary.items():
             self.summary[key] = max(self.summary.get(key, 0), value)
         self.summary[sender] = max(self.summary.get(sender, 0), dot_counter)
-        return True
+        return True, False
 
     def metadata_size(self) -> int:
         return len(self.summary) + 1
@@ -180,11 +198,190 @@ class DottedVersionVectorClock(BaseClock):
         }
 
 
+class LeaseBasedDottedVersionVectorClock(DottedVersionVectorClock):
+    """DVV with time-bounded summary entries pruned by simulation-time leases."""
+
+    def __init__(
+        self,
+        lease_duration: float,
+        initial: dict[str, int] | None = None,
+    ):
+        super().__init__(initial=initial)
+        self.lease_duration = lease_duration
+        self.expiries: dict[str, float] = {}
+
+    def _renew_entry(self, node_id: str, now: float) -> None:
+        self.expiries[node_id] = now + self.lease_duration
+
+    def _collect_expired(self, now: float) -> set[str]:
+        expired = {
+            node_id
+            for node_id, expiry in self.expiries.items()
+            if expiry <= now and node_id in self.summary
+        }
+        for node_id in expired:
+            self.summary.pop(node_id, None)
+            self.expiries.pop(node_id, None)
+        return expired
+
+    def prune_expired(self, now: float) -> set[str]:
+        return self._collect_expired(now)
+
+    def local_event(self, node_id: str, now: float) -> None:
+        self._collect_expired(now)
+        self.summary[node_id] += 1
+        self._renew_entry(node_id, now)
+
+    def prepare_send(self, node_id: str, now: float) -> dict[str, Any]:
+        expired_before_send = sorted(self._collect_expired(now))
+        self.local_event(node_id, now)
+        context = {
+            key: value for key, value in self.summary.items() if key != node_id
+        }
+        dot = (node_id, self.summary[node_id])
+        payload = {
+            "__type__": "lease_dvv",
+            "__summary__": context,
+            "__dot__": dot,
+        }
+        if expired_before_send:
+            payload["__pruned__"] = True
+        return payload
+
+    def update_on_receive(
+        self,
+        node_id: str,
+        metadata: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, bool]:
+        locally_expired = self._collect_expired(now)
+        delivered, _ = super().update_on_receive(node_id, metadata, now)
+        if not delivered:
+            return False, False
+
+        dot = metadata.get("__dot__")
+        sender = metadata.get("__sender__")
+        pruned_context = bool(metadata.get("__pruned__"))
+
+        if isinstance(dot, (tuple, list)) and len(dot) == 2:
+            dot_node = str(dot[0])
+            self._renew_entry(dot_node, now)
+            if sender is None:
+                sender = dot_node
+
+        if sender is not None:
+            self._renew_entry(str(sender), now)
+
+        potential_violation = bool(pruned_context or locally_expired)
+        return True, potential_violation
+
+    def metadata_size(self) -> int:
+        return len(self.summary) + 1
+
+    def state_entries(self) -> set[str]:
+        return set(self.summary.keys())
+
+    def state_payload(self) -> dict[str, Any]:
+        return {
+            "__type__": "lease_dvv_state",
+            "__summary__": dict(self.summary),
+            "__leases__": dict(self.expiries),
+        }
+
+
+class FrontierClock(BaseClock):
+    """Transmits only the new dot plus an immediate-dependency frontier."""
+
+    def __init__(self, initial: dict[str, int] | None = None):
+        self.summary: dict[str, int] = defaultdict(int)
+        if initial:
+            self.summary.update(initial)
+        self.frontier: dict[str, int] = {}
+
+    def local_event(self, node_id: str, now: float) -> None:
+        self.summary[node_id] += 1
+
+    def _validate_dependency_set(self, deps: dict[str, Any]) -> bool:
+        for dep_node, dep_counter in deps.items():
+            if not isinstance(dep_counter, int):
+                return False
+            if dep_counter > self.summary.get(str(dep_node), 0):
+                return False
+        return True
+
+    def _refresh_frontier(self, dot_node: str, dot_counter: int, deps: dict[str, int]) -> None:
+        for dep_node, dep_counter in deps.items():
+            dep_node = str(dep_node)
+            if self.frontier.get(dep_node, 0) <= dep_counter:
+                self.frontier.pop(dep_node, None)
+
+        if self.frontier.get(dot_node, 0) <= dot_counter:
+            self.frontier.pop(dot_node, None)
+        self.frontier[dot_node] = dot_counter
+
+    def prepare_send(self, node_id: str, now: float) -> dict[str, Any]:
+        deps = dict(self.frontier)
+        self.local_event(node_id, now)
+        dot_counter = self.summary[node_id]
+        self._refresh_frontier(node_id, dot_counter, deps)
+        return {
+            "__type__": "frontier",
+            "__frontier__": deps,
+            "__dot__": (node_id, dot_counter),
+        }
+
+    def update_on_receive(
+        self,
+        node_id: str,
+        metadata: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, bool]:
+        deps = metadata.get("__frontier__")
+        dot = metadata.get("__dot__")
+        sender = metadata.get("__sender__")
+
+        if not isinstance(deps, dict) or not isinstance(dot, (tuple, list)) or len(dot) != 2:
+            return False, False
+
+        dot_node, dot_counter = dot
+        dot_node = str(dot_node)
+        if sender is None:
+            sender = dot_node
+        if dot_node != sender or not isinstance(dot_counter, int):
+            return False, False
+        if not self._validate_dependency_set(deps):
+            return False, False
+        if self.summary.get(dot_node, 0) != dot_counter - 1:
+            return False, False
+
+        self.summary[dot_node] = dot_counter
+        self._refresh_frontier(dot_node, dot_counter, {str(k): int(v) for k, v in deps.items()})
+        return True, False
+
+    def metadata_size(self) -> int:
+        return len(self.frontier) + 1
+
+    def state_entries(self) -> set[str]:
+        return set(self.summary.keys())
+
+    def state_payload(self) -> dict[str, Any]:
+        return {
+            "__type__": "frontier_state",
+            "__summary__": dict(self.summary),
+            "__frontier__": dict(self.frontier),
+        }
+
+
 def metadata_size_for_message(metadata: dict[str, Any]) -> int:
     if "__summary__" in metadata and "__dot__" in metadata:
         summary = metadata.get("__summary__", {})
         if isinstance(summary, dict):
             return len(summary) + 1
+        return 1
+    if "__frontier__" in metadata and "__dot__" in metadata:
+        frontier = metadata.get("__frontier__", {})
+        if isinstance(frontier, dict):
+            return len(frontier) + 1
         return 1
     return len(metadata) - int("__sender__" in metadata)
 
@@ -201,7 +398,33 @@ def metadata_entries_for_message(metadata: dict[str, Any]) -> set[str]:
         if isinstance(dot, (tuple, list)) and len(dot) == 2:
             entries.add(str(dot[0]))
         return entries
+    if "__frontier__" in metadata and "__dot__" in metadata:
+        frontier = metadata.get("__frontier__", {})
+        entries = set(frontier.keys()) if isinstance(frontier, dict) else set()
+        dot = metadata.get("__dot__")
+        if isinstance(dot, (tuple, list)) and len(dot) == 2:
+            entries.add(str(dot[0]))
+        return entries
     return {key for key in metadata.keys() if not key.startswith("__")}
+
+
+def metadata_type_name(metadata: dict[str, Any]) -> str:
+    if "__frontier__" in metadata and "__dot__" in metadata:
+        return "frontier"
+    if "__summary__" in metadata and "__dot__" in metadata:
+        return str(metadata.get("__type__", "dvv"))
+    return "vector"
+
+
+def context_entry_count(metadata: dict[str, Any]) -> int:
+    if "__frontier__" in metadata:
+        frontier = metadata.get("__frontier__", {})
+        return len(frontier) if isinstance(frontier, dict) else 0
+    if "__summary__" in metadata:
+        summary = metadata.get("__summary__", {})
+        return len(summary) if isinstance(summary, dict) else 0
+    metadata_entries = metadata_entries_for_message(metadata)
+    return max(len(metadata_entries) - 1, 0)
 
 
 def round_float(value: float, digits: int = 4) -> float:
@@ -233,6 +456,7 @@ class MetricsCollector:
         self.queue_samples: list[dict[str, Any]] = []
         self.state_samples: list[dict[str, Any]] = []
         self.snapshot_samples: list[dict[str, Any]] = []
+        self.sibling_events: list[dict[str, Any]] = []
         self.throughput_samples: list[dict[str, Any]] = []
         self.violations: list[dict[str, Any]] = []
 
@@ -366,6 +590,9 @@ class MetricsCollector:
         max_state_bytes: int,
         avg_stale_state_entries: float,
         avg_stale_state_fraction: float,
+        avg_sibling_count: float,
+        max_sibling_count: int,
+        avg_hot_key_sibling_count: float,
     ) -> None:
         self.snapshot_samples.append(
             {
@@ -379,6 +606,27 @@ class MetricsCollector:
                 "max_state_bytes": max_state_bytes,
                 "avg_stale_state_entries": round_float(avg_stale_state_entries),
                 "avg_stale_state_fraction": round_float(avg_stale_state_fraction),
+                "avg_sibling_count": round_float(avg_sibling_count),
+                "max_sibling_count": max_sibling_count,
+                "avg_hot_key_sibling_count": round_float(avg_hot_key_sibling_count),
+            }
+        )
+
+    def record_sibling_event(
+        self,
+        node_id: str,
+        key: str,
+        sibling_count: int,
+        relation: str,
+        t: float,
+    ) -> None:
+        self.sibling_events.append(
+            {
+                "t": round_float(t),
+                "node": node_id,
+                "key": key,
+                "sibling_count": sibling_count,
+                "relation": relation,
             }
         )
 
@@ -408,6 +656,7 @@ class MetricsCollector:
             ("queue_samples", self.queue_samples),
             ("state_samples", self.state_samples),
             ("snapshot_samples", self.snapshot_samples),
+            ("sibling_events", self.sibling_events),
             ("throughput_samples", self.throughput_samples),
             ("violations", self.violations),
         ]:
@@ -430,6 +679,8 @@ class MetricsCollector:
         state_bytes = [row["avg_state_bytes"] for row in self.snapshot_samples]
         stale_state_entries = [row["avg_stale_state_entries"] for row in self.snapshot_samples]
         stale_state_fraction = [row["avg_stale_state_fraction"] for row in self.snapshot_samples]
+        sibling_counts = [row["avg_sibling_count"] for row in self.snapshot_samples]
+        hot_key_sibling_counts = [row["avg_hot_key_sibling_count"] for row in self.snapshot_samples]
         avg_logical_write_throughput = len(self.sends) / sim_time if sim_time else 0.0
         avg_delivery_message_throughput = (
             len(self.deliveries) / sim_time if sim_time else 0.0
@@ -495,6 +746,17 @@ class MetricsCollector:
                 else 0.0,
                 3,
             ),
+            "avg_sibling_count": round_float(
+                sum(sibling_counts) / len(sibling_counts) if sibling_counts else 0.0,
+                3,
+            ),
+            "p95_sibling_count": round_float(percentile(sibling_counts, 0.95), 3),
+            "avg_hot_key_sibling_count": round_float(
+                sum(hot_key_sibling_counts) / len(hot_key_sibling_counts)
+                if hot_key_sibling_counts
+                else 0.0,
+                3,
+            ),
             "avg_logical_write_throughput": round_float(
                 avg_logical_write_throughput, 3
             ),
@@ -524,6 +786,55 @@ class Message:
     msg_id: int = field(default_factory=next_msg_id)
 
 
+@dataclass
+class VersionRecord:
+    value: Any
+    metadata: dict[str, Any]
+    origin: str
+    created_at: float
+    msg_id: int | None = None
+
+
+def metadata_frontier(metadata: dict[str, Any]) -> dict[str, int]:
+    if "__summary__" in metadata and "__dot__" in metadata:
+        summary = metadata.get("__summary__", {})
+        frontier = dict(summary) if isinstance(summary, dict) else {}
+        dot = metadata.get("__dot__")
+        if isinstance(dot, (tuple, list)) and len(dot) == 2:
+            frontier[str(dot[0])] = int(dot[1])
+        return frontier
+    if "__frontier__" in metadata and "__dot__" in metadata:
+        frontier = metadata.get("__frontier__", {})
+        materialized = dict(frontier) if isinstance(frontier, dict) else {}
+        dot = metadata.get("__dot__")
+        if isinstance(dot, (tuple, list)) and len(dot) == 2:
+            materialized[str(dot[0])] = int(dot[1])
+        return materialized
+    return {
+        key: int(value)
+        for key, value in metadata.items()
+        if not key.startswith("__")
+    }
+
+
+def compare_metadata(a: dict[str, Any], b: dict[str, Any]) -> str:
+    a_frontier = metadata_frontier(a)
+    b_frontier = metadata_frontier(b)
+    keys = set(a_frontier) | set(b_frontier)
+    a_ge_b = all(a_frontier.get(key, 0) >= b_frontier.get(key, 0) for key in keys)
+    b_ge_a = all(b_frontier.get(key, 0) >= a_frontier.get(key, 0) for key in keys)
+    a_gt_b = any(a_frontier.get(key, 0) > b_frontier.get(key, 0) for key in keys)
+    b_gt_a = any(b_frontier.get(key, 0) > a_frontier.get(key, 0) for key in keys)
+
+    if a_ge_b and a_gt_b:
+        return "dominates"
+    if b_ge_a and b_gt_a:
+        return "dominated"
+    if a_frontier == b_frontier:
+        return "equal"
+    return "concurrent"
+
+
 class Node:
     def __init__(
         self,
@@ -536,6 +847,8 @@ class Node:
         min_lat: float,
         max_lat: float,
         key_count: int,
+        hot_key_probability: float,
+        replication_fanout: int,
     ):
         self.env = env
         self.id = node_id
@@ -546,7 +859,9 @@ class Node:
         self.min_lat = min_lat
         self.max_lat = max_lat
         self.key_count = key_count
-        self.kv: dict[str, Any] = {}
+        self.hot_key_probability = hot_key_probability
+        self.replication_fanout = replication_fanout
+        self.kv: dict[str, list[VersionRecord]] = {}
         self.buffer: list[Message] = []
         self.active = True
 
@@ -561,6 +876,7 @@ class Node:
         self._record_state_sample("stop")
 
     def _record_state_sample(self, reason: str) -> None:
+        self.clock.prune_expired(self.env.now)
         active_nodes = self.cluster.active_node_ids()
         stale_entries = len(self.clock.state_entries() - active_nodes)
         self.metrics.record_state_sample(
@@ -576,21 +892,66 @@ class Node:
         delay = random.expovariate(1.0 / self.write_interval)
         self.env.schedule(delay, self._do_write)
 
+    def _choose_key(self) -> str:
+        if self.key_count <= 1 or random.random() < self.hot_key_probability:
+            return "k0"
+        return f"k{random.randint(1, self.key_count - 1)}"
+
+    def _apply_version(
+        self,
+        key: str,
+        value: Any,
+        metadata: dict[str, Any],
+        origin: str,
+        msg_id: int | None,
+    ) -> int:
+        versions = self.kv.setdefault(key, [])
+        incoming = VersionRecord(
+            value=value,
+            metadata=copy.deepcopy(metadata),
+            origin=origin,
+            created_at=self.env.now,
+            msg_id=msg_id,
+        )
+        kept_versions: list[VersionRecord] = []
+        relation = "inserted"
+        for existing in versions:
+            ordering = compare_metadata(incoming.metadata, existing.metadata)
+            if ordering == "dominates":
+                relation = "dominates"
+                continue
+            if ordering in {"dominated", "equal"}:
+                relation = ordering
+                self.metrics.record_sibling_event(
+                    self.id, key, len(versions), relation, self.env.now
+                )
+                return len(versions)
+            kept_versions.append(existing)
+        kept_versions.append(incoming)
+        sibling_count = len(kept_versions)
+        if sibling_count > 1 and relation == "inserted":
+            relation = "concurrent"
+        self.kv[key] = kept_versions
+        self.metrics.record_sibling_event(
+            self.id, key, sibling_count, relation, self.env.now
+        )
+        return sibling_count
+
     def _do_write(self) -> None:
         if not self.active:
             return
 
-        key = f"k{random.randint(0, self.key_count - 1)}"
+        key = self._choose_key()
         value = random.randint(0, 99)
-        metadata = self.clock.prepare_send(self.id)
+        metadata = self.clock.prepare_send(self.id, self.env.now)
         metadata["__sender__"] = self.id
-        self.kv[key] = value
+        self._apply_version(key, value, metadata, self.id, None)
         metadata_entries = metadata_entries_for_message(metadata)
-        metadata_type = "dvv" if "__summary__" in metadata and "__dot__" in metadata else "vector"
-        context_entries = len(metadata.get("__summary__", {})) if "__summary__" in metadata else max(len(metadata_entries) - 1, 0)
+        metadata_type = metadata_type_name(metadata)
+        context_entries = context_entry_count(metadata)
         active_nodes = self.cluster.active_node_ids()
 
-        peers = self.cluster.active_peers(self.id)
+        peers = self.cluster.active_peers(self.id, self.replication_fanout)
         self.metrics.record_send(
             node_id=self.id,
             key=key,
@@ -632,8 +993,13 @@ class Node:
         return deliver
 
     def _receive(self, msg: Message) -> None:
-        if self.clock.update_on_receive(self.id, msg.metadata):
-            self.kv[msg.key] = msg.value
+        delivered, potential_violation = self.clock.update_on_receive(
+            self.id,
+            msg.metadata,
+            self.env.now,
+        )
+        if delivered:
+            self._apply_version(msg.key, msg.value, msg.metadata, msg.sender_id, msg.msg_id)
             self.metrics.record_delivery(
                 sender=msg.sender_id,
                 receiver=self.id,
@@ -644,6 +1010,8 @@ class Node:
                 t=self.env.now,
                 delivered_from_buffer=False,
             )
+            if potential_violation:
+                self.metrics.record_violation(self.id, msg.msg_id, self.env.now)
             self._record_state_sample("receive")
             self._retry_buffer()
             return
@@ -658,8 +1026,13 @@ class Node:
             changed = False
             still_blocked: list[Message] = []
             for msg in self.buffer:
-                if self.clock.update_on_receive(self.id, msg.metadata):
-                    self.kv[msg.key] = msg.value
+                delivered, potential_violation = self.clock.update_on_receive(
+                    self.id,
+                    msg.metadata,
+                    self.env.now,
+                )
+                if delivered:
+                    self._apply_version(msg.key, msg.value, msg.metadata, msg.sender_id, msg.msg_id)
                     self.metrics.record_delivery(
                         sender=msg.sender_id,
                         receiver=self.id,
@@ -670,6 +1043,8 @@ class Node:
                         t=self.env.now,
                         delivered_from_buffer=True,
                     )
+                    if potential_violation:
+                        self.metrics.record_violation(self.id, msg.msg_id, self.env.now)
                     self._record_state_sample("retry_receive")
                     changed = True
                 else:
@@ -686,9 +1061,9 @@ class Node:
 
 CHURN_PROFILES = {
     "stable": {"join_rate": 0.0, "leave_rate": 0.0, "burst_size": 0, "burst_interval": None},
-    "low": {"join_rate": 0.01, "leave_rate": 0.01, "burst_size": 0, "burst_interval": None},
-    "sustained": {"join_rate": 0.03, "leave_rate": 0.03, "burst_size": 0, "burst_interval": None},
-    "burst": {"join_rate": 0.005, "leave_rate": 0.005, "burst_size": 5, "burst_interval": 60.0},
+    "low": {"join_rate": 0.02, "leave_rate": 0.02, "burst_size": 0, "burst_interval": None},
+    "sustained": {"join_rate": 0.06, "leave_rate": 0.06, "burst_size": 0, "burst_interval": None},
+    "burst": {"join_rate": 0.02, "leave_rate": 0.02, "burst_size": 8, "burst_interval": 40.0},
 }
 
 
@@ -706,7 +1081,10 @@ class Cluster:
         min_lat: float,
         max_lat: float,
         key_count: int,
+        hot_key_probability: float,
+        replication_fanout: int,
         sample_interval: float,
+        lease_duration: float,
     ):
         self.env = env
         self.metrics = metrics
@@ -717,7 +1095,10 @@ class Cluster:
         self.min_lat = min_lat
         self.max_lat = max_lat
         self.key_count = key_count
+        self.hot_key_probability = hot_key_probability
+        self.replication_fanout = replication_fanout
         self.sample_interval = sample_interval
+        self.lease_duration = lease_duration
         self.profile = CHURN_PROFILES[profile]
         self.nodes: list[Node] = []
         self.counter = 0
@@ -725,8 +1106,11 @@ class Cluster:
         for _ in range(initial_size):
             self._add_node()
 
-    def active_peers(self, exclude_id: str) -> list[Node]:
-        return [node for node in self.nodes if node.active and node.id != exclude_id]
+    def active_peers(self, exclude_id: str, fanout: int | None = None) -> list[Node]:
+        peers = [node for node in self.nodes if node.active and node.id != exclude_id]
+        if fanout is None or fanout <= 0 or fanout >= len(peers):
+            return peers
+        return random.sample(peers, fanout)
 
     def active_node_ids(self) -> set[str]:
         return {node.id for node in self.nodes if node.active}
@@ -736,6 +1120,8 @@ class Cluster:
 
     def record_snapshot(self) -> None:
         active_nodes = [node for node in self.nodes if node.active]
+        for node in active_nodes:
+            node.clock.prune_expired(self.env.now)
         active_node_ids = {node.id for node in active_nodes}
         if not active_nodes:
             self.metrics.record_snapshot(
@@ -749,6 +1135,9 @@ class Cluster:
                 max_state_bytes=0,
                 avg_stale_state_entries=0.0,
                 avg_stale_state_fraction=0.0,
+                avg_sibling_count=0.0,
+                max_sibling_count=0,
+                avg_hot_key_sibling_count=0.0,
             )
             return
 
@@ -764,6 +1153,14 @@ class Cluster:
             (stale / size) if size else 0.0
             for stale, size in zip(stale_state_entries, state_sizes)
         ]
+        sibling_counts = [
+            count
+            for node in active_nodes
+            for count in [len(versions) for versions in node.kv.values()]
+        ]
+        hot_key_sibling_counts = [
+            len(node.kv.get("k0", [])) for node in active_nodes if "k0" in node.kv
+        ]
         self.metrics.record_snapshot(
             t=self.env.now,
             active_nodes=len(active_nodes),
@@ -775,6 +1172,13 @@ class Cluster:
             max_state_bytes=max(state_bytes, default=0),
             avg_stale_state_entries=sum(stale_state_entries) / len(stale_state_entries),
             avg_stale_state_fraction=sum(stale_state_fractions) / len(stale_state_fractions),
+            avg_sibling_count=sum(sibling_counts) / len(sibling_counts)
+            if sibling_counts
+            else 0.0,
+            max_sibling_count=max(sibling_counts, default=0),
+            avg_hot_key_sibling_count=sum(hot_key_sibling_counts) / len(hot_key_sibling_counts)
+            if hot_key_sibling_counts
+            else 0.0,
         )
 
     def start_sampling(self) -> None:
@@ -801,6 +1205,8 @@ class Cluster:
             min_lat=self.min_lat,
             max_lat=self.max_lat,
             key_count=self.key_count,
+            hot_key_probability=self.hot_key_probability,
+            replication_fanout=self.replication_fanout,
         )
         self.nodes.append(node)
         node.start()
@@ -863,7 +1269,10 @@ def run_scenario(
     min_lat: float,
     max_lat: float,
     key_count: int,
+    hot_key_probability: float,
+    replication_fanout: int,
     sample_interval: float,
+    lease_duration: float = 60.0,
 ) -> MetricsCollector:
     global _MSG_ID
     _MSG_ID = 0
@@ -882,7 +1291,10 @@ def run_scenario(
         min_lat=min_lat,
         max_lat=max_lat,
         key_count=key_count,
+        hot_key_probability=hot_key_probability,
+        replication_fanout=replication_fanout,
         sample_interval=sample_interval,
+        lease_duration=lease_duration,
     )
     cluster.start_churn()
     cluster.start_sampling()
@@ -906,8 +1318,22 @@ def save_run(
     return summary
 
 
+def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], BaseClock]:
+    if clock_name == "vector":
+        return VectorClock
+    if clock_name == "dvv":
+        return DottedVersionVectorClock
+    if clock_name == "frontier":
+        return FrontierClock
+    if clock_name == "lease_dvv":
+        return lambda: LeaseBasedDottedVersionVectorClock(lease_duration=lease_duration)
+    raise KeyError(f"Unknown clock: {clock_name}")
+
+
 CLOCK_FACTORIES: dict[str, Callable[[], BaseClock]] = {
     "dvv": DottedVersionVectorClock,
+    "frontier": FrontierClock,
+    "lease_dvv": lambda: LeaseBasedDottedVersionVectorClock(lease_duration=60.0),
     "vector": VectorClock,
 }
 
@@ -935,7 +1361,10 @@ def build_parser() -> configargparse.ArgParser:
     parser.add_argument("--min-lat", type=float, default=1.0)
     parser.add_argument("--max-lat", type=float, default=5.0)
     parser.add_argument("--key-count", type=int, default=5)
+    parser.add_argument("--hot-key-probability", type=float, default=0.8)
+    parser.add_argument("--replication-fanout", type=int, default=0)
     parser.add_argument("--sample-interval", type=float, default=20.0)
+    parser.add_argument("--lease-duration", type=float, default=60.0)
     parser.add_argument("--output-dir", default="output/runs")
     parser.add_argument("--run-name", default="run")
     return parser
@@ -947,7 +1376,7 @@ def main() -> None:
 
     metrics = run_scenario(
         profile=args.profile,
-        clock_factory=CLOCK_FACTORIES[args.clock],
+        clock_factory=make_clock_factory(args.clock, args.lease_duration),
         sim_time=args.sim_time,
         seed=args.seed,
         initial_size=args.initial_size,
@@ -957,7 +1386,10 @@ def main() -> None:
         min_lat=args.min_lat,
         max_lat=args.max_lat,
         key_count=args.key_count,
+        hot_key_probability=args.hot_key_probability,
+        replication_fanout=args.replication_fanout,
         sample_interval=args.sample_interval,
+        lease_duration=args.lease_duration,
     )
 
     output_dir = Path(args.output_dir)
@@ -973,7 +1405,10 @@ def main() -> None:
         "min_lat": args.min_lat,
         "max_lat": args.max_lat,
         "key_count": args.key_count,
+        "hot_key_probability": args.hot_key_probability,
+        "replication_fanout": args.replication_fanout,
         "sample_interval": args.sample_interval,
+        "lease_duration": args.lease_duration,
         "output_dir": args.output_dir,
         "run_name": args.run_name,
     }

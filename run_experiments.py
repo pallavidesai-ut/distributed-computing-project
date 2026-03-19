@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 from pathlib import Path
-from typing import Any
 
 import configargparse
 
@@ -14,7 +14,7 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
 import matplotlib.pyplot as plt
 
 from analyze_run import analyze_run
-from code import CLOCK_FACTORIES, run_scenario, save_run
+from code import CLOCK_FACTORIES, make_clock_factory, run_scenario, save_run
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -43,6 +43,13 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def load_csv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 def aggregate_runs(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for row in rows:
@@ -62,85 +69,316 @@ def aggregate_runs(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             "num_runs": len(group),
         }
         for metric in metric_keys:
-            numeric_values = [
+            values = [
                 float(candidate[metric])
                 for candidate in group
                 if isinstance(candidate.get(metric), (int, float))
             ]
-            if numeric_values:
-                row[metric] = round(mean(numeric_values), 3)
+            if values:
+                row[metric] = round(mean(values), 3)
         aggregated.append(row)
     return aggregated
 
 
-def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> None:
-    metrics = [
-        ("metadata_growth.avg_metadata_size", "Average Metadata Size", "metadata_comparison.png"),
-        (
-            "metadata_representation.avg_metadata_bytes",
-            "Average Metadata Bytes",
-            "metadata_bytes_comparison.png",
-        ),
-        (
-            "stale_metadata.avg_stale_metadata_entries",
-            "Average Stale Metadata Entries",
-            "stale_metadata_comparison.png",
-        ),
-        (
-            "clock_state.avg_state_size",
-            "Average Clock State Size",
-            "clock_state_comparison.png",
-        ),
-        (
-            "clock_state.avg_state_bytes",
-            "Average Clock State Bytes",
-            "clock_state_bytes_comparison.png",
-        ),
-        ("latency.latency_p95", "P95 Latency", "latency_p95_comparison.png"),
-        (
-            "queue_length.avg_time_weighted_queue_len",
-            "Avg Time-Weighted Queue Length",
-            "queue_comparison.png",
-        ),
-        (
-            "throughput.avg_logical_write_throughput",
-            "Average Logical Write Throughput",
-            "logical_write_throughput_comparison.png",
-        ),
-    ]
+def aggregate_time_series(
+    run_rows: list[dict[str, object]],
+    *,
+    relative_csv: str,
+    x_key: str,
+    y_keys: list[str],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str, float], dict[str, list[float]]] = {}
+    for row in run_rows:
+        analysis_dir = Path(str(row["analysis_dir"]))
+        for point in load_csv(analysis_dir / relative_csv):
+            x_value = float(point[x_key])
+            key = (str(row["profile"]), str(row["clock"]), x_value)
+            bucket = grouped.setdefault(key, {metric: [] for metric in y_keys})
+            for metric in y_keys:
+                value = point.get(metric)
+                if value not in {None, ""}:
+                    bucket[metric].append(float(value))
+
+    aggregated: list[dict[str, object]] = []
+    for (profile, clock, x_value), metric_values in sorted(grouped.items()):
+        entry: dict[str, object] = {
+            "profile": profile,
+            "clock": clock,
+            x_key: round(x_value, 3),
+        }
+        for metric, values in metric_values.items():
+            if values:
+                entry[metric] = round(mean(values), 3)
+        aggregated.append(entry)
+    return aggregated
+
+
+def grouped_profile_bar_plot(
+    rows: list[dict[str, object]],
+    *,
+    metric_key: str,
+    ylabel: str,
+    title: str,
+    filename: str,
+    output_dir: Path,
+) -> None:
     profiles = sorted({str(row["profile"]) for row in rows})
     clocks = sorted({str(row["clock"]) for row in rows})
+    if not profiles or not clocks:
+        return
 
-    for metric_key, title, filename in metrics:
-        plt.figure(figsize=(10, 5))
-        x_labels: list[str] = []
+    width = 0.8 / max(len(clocks), 1)
+    x_positions = list(range(len(profiles)))
+    fig, ax = plt.subplots(figsize=(10, 5))
+    plotted = False
+
+    for idx, clock in enumerate(clocks):
         values: list[float] = []
-        for profile in profiles:
-            for clock in clocks:
-                match = next(
-                    (
-                        row
-                        for row in rows
-                        if str(row["profile"]) == profile and str(row["clock"]) == clock
-                    ),
-                    None,
-                )
-                if match is None or metric_key not in match:
-                    continue
-                x_labels.append(f"{profile}\n{clock}")
+        positions: list[float] = []
+        for profile_index, profile in enumerate(profiles):
+            match = next(
+                (
+                    row
+                    for row in rows
+                    if str(row["profile"]) == profile
+                    and str(row["clock"]) == clock
+                    and metric_key in row
+                ),
+                None,
+            )
+            if match is None:
+                values.append(math.nan)
+            else:
                 values.append(float(match[metric_key]))
+                plotted = True
+            positions.append(
+                x_positions[profile_index] - 0.4 + (idx + 0.5) * width
+            )
+        ax.bar(positions, values, width=width, label=clock)
 
-        if not values:
-            plt.close()
+    if not plotted:
+        plt.close(fig)
+        return
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(profiles)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_dir / filename, dpi=150)
+    plt.close(fig)
+
+
+def make_tradeoff_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
+    points: list[dict[str, object]] = []
+    profiles = sorted({str(row["profile"]) for row in rows})
+    for profile in profiles:
+        dvv = next(
+            (
+                row
+                for row in rows
+                if str(row["profile"]) == profile and str(row["clock"]) == "dvv"
+            ),
+            None,
+        )
+        lease_dvv = next(
+            (
+                row
+                for row in rows
+                if str(row["profile"]) == profile and str(row["clock"]) == "lease_dvv"
+            ),
+            None,
+        )
+        if dvv is None or lease_dvv is None:
             continue
 
-        plt.bar(range(len(values)), values)
-        plt.xticks(range(len(values)), x_labels)
-        plt.ylabel(title)
-        plt.title(title)
-        plt.tight_layout()
-        plt.savefig(output_dir / filename, dpi=150)
-        plt.close()
+        baseline = float(dvv.get("metadata_representation.avg_metadata_bytes", 0.0))
+        lease_value = float(lease_dvv.get("metadata_representation.avg_metadata_bytes", 0.0))
+        violation_rate = float(lease_dvv.get("violations.violation_rate", 0.0))
+        reduction_pct = ((baseline - lease_value) / baseline * 100.0) if baseline else 0.0
+        points.append(
+            {
+                "profile": profile,
+                "metadata_reduction_pct": round(reduction_pct, 3),
+                "violation_rate": round(violation_rate, 4),
+            }
+        )
+
+    write_csv(output_dir / "violation_rate_vs_metadata_reduction.csv", points)
+    if not points:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    xs = [float(point["metadata_reduction_pct"]) for point in points]
+    ys = [float(point["violation_rate"]) for point in points]
+    ax.scatter(xs, ys, s=60)
+    for point in points:
+        ax.annotate(
+            str(point["profile"]),
+            (float(point["metadata_reduction_pct"]), float(point["violation_rate"])),
+            xytext=(5, 5),
+            textcoords="offset points",
+        )
+    ax.set_xlabel("Metadata reduction vs DVV (%)")
+    ax.set_ylabel("Violation rate")
+    ax.set_title("Lease-DVV Correctness Tradeoff")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_dir / "violation_rate_vs_metadata_reduction.png", dpi=150)
+    plt.close(fig)
+
+
+def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir: Path) -> None:
+    time_plot_specs = [
+        {
+            "csv": "churn_over_time.csv",
+            "x_key": "window_start",
+            "y_key": "avg_active_nodes",
+            "title": "Active Nodes Over Time",
+            "ylabel": "Active nodes",
+            "filename": "active_nodes_over_time_report.png",
+        },
+        {
+            "csv": "metadata_representation.csv",
+            "x_key": "window_start",
+            "y_key": "avg_metadata_bytes",
+            "title": "Metadata Bytes Over Time",
+            "ylabel": "Metadata bytes",
+            "filename": "metadata_bytes_over_time_report.png",
+        },
+        {
+            "csv": "queue_length_over_time.csv",
+            "x_key": "window_start",
+            "y_key": "avg_queue_len",
+            "title": "Queue Length Over Time",
+            "ylabel": "Queue length",
+            "filename": "queue_length_over_time_report.png",
+        },
+        {
+            "csv": "violations_over_time.csv",
+            "x_key": "window_start",
+            "y_key": "violation_rate",
+            "title": "Violation Rate Over Time",
+            "ylabel": "Violation rate",
+            "filename": "violations_over_time_report.png",
+        },
+    ]
+
+    time_series_dir = output_dir / "time_series_report"
+    time_series_dir.mkdir(parents=True, exist_ok=True)
+    profiles = sorted({str(row["profile"]) for row in run_rows})
+    clocks = sorted({str(row["clock"]) for row in run_rows})
+
+    for spec in time_plot_specs:
+        aggregated = aggregate_time_series(
+            run_rows,
+            relative_csv=spec["csv"],
+            x_key=spec["x_key"],
+            y_keys=[spec["y_key"]],
+        )
+        if not aggregated:
+            continue
+
+        write_csv(
+            time_series_dir / spec["filename"].replace(".png", ".csv"),
+            aggregated,
+        )
+
+        fig, axes = plt.subplots(
+            len(profiles),
+            1,
+            figsize=(11, max(4, 3.5 * len(profiles))),
+            sharex=True,
+        )
+        if len(profiles) == 1:
+            axes = [axes]
+
+        plotted = False
+        for axis, profile in zip(axes, profiles):
+            profile_rows = [row for row in aggregated if str(row["profile"]) == profile]
+            for clock in clocks:
+                clock_rows = [
+                    row
+                    for row in profile_rows
+                    if str(row["clock"]) == clock and spec["y_key"] in row
+                ]
+                if not clock_rows:
+                    continue
+                axis.plot(
+                    [float(row[spec["x_key"]]) for row in clock_rows],
+                    [float(row[spec["y_key"]]) for row in clock_rows],
+                    marker="o",
+                    linewidth=2,
+                    label=clock,
+                )
+                plotted = True
+            axis.set_title(profile)
+            axis.set_ylabel(spec["ylabel"])
+            axis.grid(alpha=0.25)
+
+        if not plotted:
+            plt.close(fig)
+            continue
+
+        axes[0].legend(ncol=min(4, len(clocks)))
+        axes[-1].set_xlabel("Simulation time")
+        fig.suptitle(spec["title"])
+        fig.tight_layout()
+        fig.savefig(time_series_dir / spec["filename"], dpi=150)
+        plt.close(fig)
+
+
+def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> None:
+    plot_specs = [
+        (
+            "metadata_representation.avg_metadata_bytes",
+            "Average metadata bytes",
+            "Metadata Cost vs Churn Profile",
+            "metadata_bytes_vs_profile.png",
+        ),
+        (
+            "stale_metadata.avg_stale_metadata_fraction",
+            "Average stale metadata fraction",
+            "Stale Metadata vs Churn Profile",
+            "stale_metadata_fraction_vs_profile.png",
+        ),
+        (
+            "queue_length.p95_time_weighted_queue_len",
+            "P95 time-weighted queue length",
+            "Buffering Penalty vs Churn Profile",
+            "queue_p95_vs_profile.png",
+        ),
+        (
+            "latency.latency_p95",
+            "P95 latency",
+            "Latency vs Churn Profile",
+            "latency_p95_vs_profile.png",
+        ),
+        (
+            "metadata_representation.avg_metadata_bytes_per_active_node",
+            "Avg metadata bytes per active node",
+            "Normalized Metadata Cost vs Churn Profile",
+            "metadata_bytes_per_active_node_vs_profile.png",
+        ),
+        (
+            "clock_state.avg_state_bytes_per_active_node",
+            "Avg state bytes per active node",
+            "Normalized Clock State vs Churn Profile",
+            "state_bytes_per_active_node_vs_profile.png",
+        ),
+    ]
+    for metric_key, ylabel, title, filename in plot_specs:
+        grouped_profile_bar_plot(
+            rows,
+            metric_key=metric_key,
+            ylabel=ylabel,
+            title=title,
+            filename=filename,
+            output_dir=output_dir,
+        )
+    make_tradeoff_plot(rows, output_dir)
 
 
 def build_parser() -> configargparse.ArgParser:
@@ -156,7 +394,12 @@ def build_parser() -> configargparse.ArgParser:
         help="Path to a YAML config file.",
     )
     parser.add("--clocks", nargs="+", choices=sorted(CLOCK_FACTORIES), default=["vector", "dvv"])
-    parser.add("--profiles", nargs="+", choices=["stable", "low", "sustained", "burst"], default=["stable", "sustained"])
+    parser.add(
+        "--profiles",
+        nargs="+",
+        choices=["stable", "low", "sustained", "burst"],
+        default=["stable", "sustained"],
+    )
     parser.add("--seeds", nargs="+", type=int, default=[11, 22, 33])
     parser.add("--sim-time", type=float, default=300.0)
     parser.add("--initial-size", type=int, default=15)
@@ -166,7 +409,10 @@ def build_parser() -> configargparse.ArgParser:
     parser.add("--min-lat", type=float, default=1.0)
     parser.add("--max-lat", type=float, default=5.0)
     parser.add("--key-count", type=int, default=5)
+    parser.add("--hot-key-probability", type=float, default=0.8)
+    parser.add("--replication-fanout", type=int, default=0)
     parser.add("--sample-interval", type=float, default=20.0)
+    parser.add("--lease-duration", type=float, default=60.0)
     parser.add("--analysis-window", type=float, default=25.0)
     parser.add("--output-dir", default="output/experiments")
     parser.add("--experiment-name", default="baseline")
@@ -190,12 +436,17 @@ def main() -> None:
         "min_lat": args.min_lat,
         "max_lat": args.max_lat,
         "key_count": args.key_count,
+        "hot_key_probability": args.hot_key_probability,
+        "replication_fanout": args.replication_fanout,
         "sample_interval": args.sample_interval,
+        "lease_duration": args.lease_duration,
         "analysis_window": args.analysis_window,
         "output_dir": args.output_dir,
         "experiment_name": args.experiment_name,
     }
-    (experiment_dir / "experiment_config.json").write_text(json.dumps(experiment_config, indent=2))
+    (experiment_dir / "experiment_config.json").write_text(
+        json.dumps(experiment_config, indent=2)
+    )
 
     run_rows: list[dict[str, object]] = []
     for profile in args.profiles:
@@ -205,7 +456,7 @@ def main() -> None:
                 run_dir = experiment_dir / run_name
                 metrics = run_scenario(
                     profile=profile,
-                    clock_factory=CLOCK_FACTORIES[clock],
+                    clock_factory=make_clock_factory(clock, args.lease_duration),
                     sim_time=args.sim_time,
                     seed=seed,
                     initial_size=args.initial_size,
@@ -215,7 +466,10 @@ def main() -> None:
                     min_lat=args.min_lat,
                     max_lat=args.max_lat,
                     key_count=args.key_count,
+                    hot_key_probability=args.hot_key_probability,
+                    replication_fanout=args.replication_fanout,
                     sample_interval=args.sample_interval,
+                    lease_duration=args.lease_duration,
                 )
                 run_config = {
                     "profile": profile,
@@ -229,7 +483,10 @@ def main() -> None:
                     "min_lat": args.min_lat,
                     "max_lat": args.max_lat,
                     "key_count": args.key_count,
+                    "hot_key_probability": args.hot_key_probability,
+                    "replication_fanout": args.replication_fanout,
                     "sample_interval": args.sample_interval,
+                    "lease_duration": args.lease_duration,
                     "output_dir": str(run_dir),
                     "run_name": run_name,
                 }
@@ -261,8 +518,11 @@ def main() -> None:
     write_csv(experiment_dir / "comparison_runs.csv", run_rows)
     aggregated_rows = aggregate_runs(run_rows)
     write_csv(experiment_dir / "comparison_by_clock.csv", aggregated_rows)
-    (experiment_dir / "comparison_by_clock.json").write_text(json.dumps(aggregated_rows, indent=2))
+    (experiment_dir / "comparison_by_clock.json").write_text(
+        json.dumps(aggregated_rows, indent=2)
+    )
     make_comparison_plots(aggregated_rows, experiment_dir)
+    write_time_series_report_plots(run_rows, experiment_dir)
 
 
 if __name__ == "__main__":
