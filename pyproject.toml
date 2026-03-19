@@ -13,12 +13,15 @@ authors = [
   { name = "Eric Nelson" },
 ]
 dependencies = [
+  "configargparse>=1.7,<2",
   "matplotlib>=3.8,<4",
+  "PyYAML>=6,<7",
 ]
 
 [project.scripts]
 simulate-churn = "code:main"
 analyze-churn-run = "analyze_run:main"
+run-churn-experiments = "run_experiments:main"
 
 [tool.setuptools]
-py-modules = ["code", "analyze_run"]
+py-modules = ["code", "analyze_run", "run_experiments"]
