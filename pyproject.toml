@@ -12,5 +12,13 @@ authors = [
   { name = "Pallavi Desai" },
   { name = "Eric Nelson" },
 ]
-dependencies = []
+dependencies = [
+  "matplotlib>=3.8,<4",
+]
 
+[project.scripts]
+simulate-churn = "code:main"
+analyze-churn-run = "analyze_run:main"
+
+[tool.setuptools]
+py-modules = ["code", "analyze_run"]
