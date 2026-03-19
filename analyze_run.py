@@ -177,6 +177,59 @@ def analyze_metadata_growth(
     }
 
 
+def analyze_metadata_representation(
+    sends: list[dict[str, str]],
+    window: float,
+    output_dir: Path,
+) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    buckets = bucket_rows(sends, window)
+    for bucket in sorted(buckets):
+        bucket_rows_ = buckets[bucket]
+        metadata_bytes = [parse_int(row["metadata_bytes"]) for row in bucket_rows_]
+        context_entries = [parse_int(row["context_entries"]) for row in bucket_rows_]
+        rows.append(
+            {
+                "window_start": bucket * window,
+                "window_end": (bucket + 1) * window,
+                "send_count": len(bucket_rows_),
+                "avg_metadata_bytes": round(mean(metadata_bytes), 3),
+                "p95_metadata_bytes": round(percentile(metadata_bytes, 0.95), 3),
+                "avg_context_entries": round(mean(context_entries), 3),
+            }
+        )
+
+    write_csv(output_dir / "metadata_representation.csv", rows)
+
+    if rows:
+        xs = [row["window_start"] for row in rows]
+        metadata_bytes = [row["avg_metadata_bytes"] for row in rows]
+        context_entries = [row["avg_context_entries"] for row in rows]
+
+        plt.figure(figsize=(9, 5))
+        plt.plot(xs, metadata_bytes, label="avg metadata bytes")
+        plt.plot(xs, context_entries, label="avg context entries")
+        plt.xlabel("Simulation time")
+        plt.ylabel("Metadata representation")
+        plt.title("Metadata Representation Over Time")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / "metadata_representation.png", dpi=150)
+        plt.close()
+
+    all_metadata_bytes = [parse_int(row["metadata_bytes"]) for row in sends]
+    all_context_entries = [parse_int(row["context_entries"]) for row in sends]
+    return {
+        "avg_metadata_bytes": round(mean(all_metadata_bytes), 3)
+        if all_metadata_bytes
+        else 0.0,
+        "p95_metadata_bytes": round(percentile(all_metadata_bytes, 0.95), 3),
+        "avg_context_entries": round(mean(all_context_entries), 3)
+        if all_context_entries
+        else 0.0,
+    }
+
+
 def analyze_stale_metadata(
     sends: list[dict[str, str]],
     window: float,
@@ -285,6 +338,8 @@ def analyze_clock_state(
                 "window_start": parse_float(row["t"]),
                 "avg_state_size": parse_float(row["avg_state_size"]),
                 "max_state_size": parse_int(row["max_state_size"]),
+                "avg_state_bytes": parse_float(row["avg_state_bytes"]),
+                "max_state_bytes": parse_int(row["max_state_bytes"]),
                 "avg_stale_state_entries": parse_float(row["avg_stale_state_entries"]),
                 "avg_stale_state_fraction": parse_float(row["avg_stale_state_fraction"]),
                 "active_nodes": parse_int(row["active_nodes"]),
@@ -296,10 +351,12 @@ def analyze_clock_state(
     if rows:
         xs = [row["window_start"] for row in rows]
         state_size = [row["avg_state_size"] for row in rows]
+        state_bytes = [row["avg_state_bytes"] for row in rows]
         stale_entries = [row["avg_stale_state_entries"] for row in rows]
 
         plt.figure(figsize=(9, 5))
         plt.plot(xs, state_size, label="avg state size")
+        plt.plot(xs, state_bytes, label="avg state bytes")
         plt.plot(xs, stale_entries, label="avg stale state entries")
         plt.xlabel("Simulation time")
         plt.ylabel("Clock state")
@@ -315,6 +372,15 @@ def analyze_clock_state(
     return {
         "avg_state_size": round(mean(all_state_sizes), 3) if all_state_sizes else 0.0,
         "p95_state_size": round(percentile(all_state_sizes, 0.95), 3),
+        "avg_state_bytes": round(
+            mean(parse_float(row["avg_state_bytes"]) for row in snapshot_samples), 3
+        )
+        if snapshot_samples
+        else 0.0,
+        "p95_state_bytes": round(
+            percentile([parse_float(row["avg_state_bytes"]) for row in snapshot_samples], 0.95),
+            3,
+        ),
         "avg_stale_state_entries": round(mean(all_stale_entries), 3)
         if all_stale_entries
         else 0.0,
@@ -443,6 +509,7 @@ def analyze_run(
 
     sections = {
         "metadata_growth": analyze_metadata_growth(sends, window, output_dir),
+        "metadata_representation": analyze_metadata_representation(sends, window, output_dir),
         "stale_metadata": analyze_stale_metadata(sends, window, output_dir),
         "queue_length": analyze_queue_lengths(queue_samples, snapshot_samples, window, output_dir),
         "clock_state": analyze_clock_state(snapshot_samples, window, output_dir),

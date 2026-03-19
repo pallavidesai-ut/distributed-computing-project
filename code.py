@@ -66,6 +66,10 @@ class BaseClock(ABC):
     def state_entries(self) -> set[str]:
         raise NotImplementedError
 
+    @abstractmethod
+    def state_payload(self) -> dict[str, Any]:
+        raise NotImplementedError
+
 
 class VectorClock(BaseClock):
     """Standard vector clock with a causal delivery check."""
@@ -104,6 +108,9 @@ class VectorClock(BaseClock):
 
     def state_entries(self) -> set[str]:
         return set(self.vc.keys())
+
+    def state_payload(self) -> dict[str, Any]:
+        return dict(self.vc)
 
 
 class DottedVersionVectorClock(BaseClock):
@@ -166,6 +173,12 @@ class DottedVersionVectorClock(BaseClock):
     def state_entries(self) -> set[str]:
         return set(self.summary.keys())
 
+    def state_payload(self) -> dict[str, Any]:
+        return {
+            "__type__": "dvv_state",
+            "__summary__": dict(self.summary),
+        }
+
 
 def metadata_size_for_message(metadata: dict[str, Any]) -> int:
     if "__summary__" in metadata and "__dot__" in metadata:
@@ -174,6 +187,10 @@ def metadata_size_for_message(metadata: dict[str, Any]) -> int:
             return len(summary) + 1
         return 1
     return len(metadata) - int("__sender__" in metadata)
+
+
+def encoded_size_bytes(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
 def metadata_entries_for_message(metadata: dict[str, Any]) -> set[str]:
@@ -224,6 +241,9 @@ class MetricsCollector:
         node_id: str,
         key: str,
         meta_size: int,
+        metadata_bytes: int,
+        metadata_type: str,
+        context_entries: int,
         stale_metadata_entries: int,
         stale_metadata_fraction: float,
         fanout: int,
@@ -235,6 +255,9 @@ class MetricsCollector:
             "node": node_id,
             "key": key,
             "meta_size": meta_size,
+            "metadata_bytes": metadata_bytes,
+            "metadata_type": metadata_type,
+            "context_entries": context_entries,
             "stale_metadata_entries": stale_metadata_entries,
             "stale_metadata_fraction": round_float(stale_metadata_fraction),
             "fanout": fanout,
@@ -339,6 +362,8 @@ class MetricsCollector:
         max_queue_len: int,
         avg_state_size: float,
         max_state_size: int,
+        avg_state_bytes: float,
+        max_state_bytes: int,
         avg_stale_state_entries: float,
         avg_stale_state_fraction: float,
     ) -> None:
@@ -350,6 +375,8 @@ class MetricsCollector:
                 "max_queue_len": max_queue_len,
                 "avg_state_size": round_float(avg_state_size),
                 "max_state_size": max_state_size,
+                "avg_state_bytes": round_float(avg_state_bytes),
+                "max_state_bytes": max_state_bytes,
                 "avg_stale_state_entries": round_float(avg_stale_state_entries),
                 "avg_stale_state_fraction": round_float(avg_stale_state_fraction),
             }
@@ -394,11 +421,13 @@ class MetricsCollector:
 
     def summary(self, sim_time: float) -> dict[str, Any]:
         send_meta = [row["meta_size"] for row in self.sends]
+        send_meta_bytes = [row["metadata_bytes"] for row in self.sends]
         stale_meta = [row["stale_metadata_entries"] for row in self.sends]
         stale_meta_fraction = [row["stale_metadata_fraction"] for row in self.sends]
         delivery_latencies = [row["latency"] for row in self.deliveries]
         queue_lengths = [row["avg_queue_len"] for row in self.snapshot_samples]
         state_sizes = [row["avg_state_size"] for row in self.snapshot_samples]
+        state_bytes = [row["avg_state_bytes"] for row in self.snapshot_samples]
         stale_state_entries = [row["avg_stale_state_entries"] for row in self.snapshot_samples]
         stale_state_fraction = [row["avg_stale_state_fraction"] for row in self.snapshot_samples]
         avg_logical_write_throughput = len(self.sends) / sim_time if sim_time else 0.0
@@ -416,6 +445,11 @@ class MetricsCollector:
             "avg_metadata_size": round_float(sum(send_meta) / len(send_meta) if send_meta else 0.0, 3),
             "max_metadata_size": max(send_meta, default=0),
             "metadata_size_p95": round_float(percentile(send_meta, 0.95), 3),
+            "avg_metadata_bytes": round_float(
+                sum(send_meta_bytes) / len(send_meta_bytes) if send_meta_bytes else 0.0,
+                3,
+            ),
+            "p95_metadata_bytes": round_float(percentile(send_meta_bytes, 0.95), 3),
             "avg_stale_metadata_entries": round_float(
                 sum(stale_meta) / len(stale_meta) if stale_meta else 0.0,
                 3,
@@ -444,6 +478,11 @@ class MetricsCollector:
                 3,
             ),
             "p95_state_size": round_float(percentile(state_sizes, 0.95), 3),
+            "avg_state_bytes": round_float(
+                sum(state_bytes) / len(state_bytes) if state_bytes else 0.0,
+                3,
+            ),
+            "p95_state_bytes": round_float(percentile(state_bytes, 0.95), 3),
             "avg_stale_state_entries": round_float(
                 sum(stale_state_entries) / len(stale_state_entries)
                 if stale_state_entries
@@ -547,6 +586,8 @@ class Node:
         metadata["__sender__"] = self.id
         self.kv[key] = value
         metadata_entries = metadata_entries_for_message(metadata)
+        metadata_type = "dvv" if "__summary__" in metadata and "__dot__" in metadata else "vector"
+        context_entries = len(metadata.get("__summary__", {})) if "__summary__" in metadata else max(len(metadata_entries) - 1, 0)
         active_nodes = self.cluster.active_node_ids()
 
         peers = self.cluster.active_peers(self.id)
@@ -554,6 +595,9 @@ class Node:
             node_id=self.id,
             key=key,
             meta_size=metadata_size_for_message(metadata),
+            metadata_bytes=encoded_size_bytes(metadata),
+            metadata_type=metadata_type,
+            context_entries=context_entries,
             stale_metadata_entries=len(metadata_entries - active_nodes),
             stale_metadata_fraction=(
                 len(metadata_entries - active_nodes) / len(metadata_entries)
@@ -701,6 +745,8 @@ class Cluster:
                 max_queue_len=0,
                 avg_state_size=0.0,
                 max_state_size=0,
+                avg_state_bytes=0.0,
+                max_state_bytes=0,
                 avg_stale_state_entries=0.0,
                 avg_stale_state_fraction=0.0,
             )
@@ -708,6 +754,9 @@ class Cluster:
 
         queue_lengths = [len(node.buffer) for node in active_nodes]
         state_sizes = [len(node.clock.state_entries()) for node in active_nodes]
+        state_bytes = [
+            encoded_size_bytes(node.clock.state_payload()) for node in active_nodes
+        ]
         stale_state_entries = [
             len(node.clock.state_entries() - active_node_ids) for node in active_nodes
         ]
@@ -722,6 +771,8 @@ class Cluster:
             max_queue_len=max(queue_lengths, default=0),
             avg_state_size=sum(state_sizes) / len(state_sizes),
             max_state_size=max(state_sizes, default=0),
+            avg_state_bytes=sum(state_bytes) / len(state_bytes),
+            max_state_bytes=max(state_bytes, default=0),
             avg_stale_state_entries=sum(stale_state_entries) / len(stale_state_entries),
             avg_stale_state_fraction=sum(stale_state_fractions) / len(stale_state_fractions),
         )

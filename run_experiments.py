@@ -77,6 +77,11 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
     metrics = [
         ("metadata_growth.avg_metadata_size", "Average Metadata Size", "metadata_comparison.png"),
         (
+            "metadata_representation.avg_metadata_bytes",
+            "Average Metadata Bytes",
+            "metadata_bytes_comparison.png",
+        ),
+        (
             "stale_metadata.avg_stale_metadata_entries",
             "Average Stale Metadata Entries",
             "stale_metadata_comparison.png",
@@ -85,6 +90,11 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
             "clock_state.avg_state_size",
             "Average Clock State Size",
             "clock_state_comparison.png",
+        ),
+        (
+            "clock_state.avg_state_bytes",
+            "Average Clock State Bytes",
+            "clock_state_bytes_comparison.png",
         ),
         ("latency.latency_p95", "P95 Latency", "latency_p95_comparison.png"),
         (
