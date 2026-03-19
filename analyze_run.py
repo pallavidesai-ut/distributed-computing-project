@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import math
 import os
 from pathlib import Path
 from statistics import mean
+
+import configargparse
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
@@ -176,24 +177,73 @@ def analyze_metadata_growth(
     }
 
 
-def analyze_queue_lengths(
-    queue_samples: list[dict[str, str]],
+def analyze_stale_metadata(
+    sends: list[dict[str, str]],
     window: float,
     output_dir: Path,
 ) -> dict[str, object]:
     rows: list[dict[str, object]] = []
-    buckets = bucket_rows(queue_samples, window)
+    buckets = bucket_rows(sends, window)
     for bucket in sorted(buckets):
         bucket_rows_ = buckets[bucket]
-        queue_lengths = [parse_int(row["queue_len"]) for row in bucket_rows_]
+        stale_entries = [parse_int(row["stale_metadata_entries"]) for row in bucket_rows_]
+        stale_fractions = [parse_float(row["stale_metadata_fraction"]) for row in bucket_rows_]
         rows.append(
             {
                 "window_start": bucket * window,
                 "window_end": (bucket + 1) * window,
-                "sample_count": len(bucket_rows_),
-                "avg_queue_len": round(mean(queue_lengths), 3),
-                "p95_queue_len": round(percentile(queue_lengths, 0.95), 3),
-                "max_queue_len": max(queue_lengths),
+                "send_count": len(bucket_rows_),
+                "avg_stale_metadata_entries": round(mean(stale_entries), 3),
+                "p95_stale_metadata_entries": round(percentile(stale_entries, 0.95), 3),
+                "avg_stale_metadata_fraction": round(mean(stale_fractions), 3),
+            }
+        )
+
+    write_csv(output_dir / "stale_metadata_over_time.csv", rows)
+
+    if rows:
+        xs = [row["window_start"] for row in rows]
+        stale_entries = [row["avg_stale_metadata_entries"] for row in rows]
+        stale_fraction = [row["avg_stale_metadata_fraction"] for row in rows]
+
+        plt.figure(figsize=(9, 5))
+        plt.plot(xs, stale_entries, label="avg stale entries")
+        plt.plot(xs, stale_fraction, label="avg stale fraction")
+        plt.xlabel("Simulation time")
+        plt.ylabel("Stale membership metadata")
+        plt.title("Stale Metadata Under Churn")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / "stale_metadata_over_time.png", dpi=150)
+        plt.close()
+
+    all_stale_entries = [parse_int(row["stale_metadata_entries"]) for row in sends]
+    all_stale_fractions = [parse_float(row["stale_metadata_fraction"]) for row in sends]
+    return {
+        "avg_stale_metadata_entries": round(mean(all_stale_entries), 3)
+        if all_stale_entries
+        else 0.0,
+        "p95_stale_metadata_entries": round(percentile(all_stale_entries, 0.95), 3),
+        "avg_stale_metadata_fraction": round(mean(all_stale_fractions), 3)
+        if all_stale_fractions
+        else 0.0,
+    }
+
+
+def analyze_queue_lengths(
+    queue_samples: list[dict[str, str]],
+    snapshot_samples: list[dict[str, str]],
+    window: float,
+    output_dir: Path,
+) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    for row in snapshot_samples:
+        rows.append(
+            {
+                "window_start": parse_float(row["t"]),
+                "avg_queue_len": parse_float(row["avg_queue_len"]),
+                "max_queue_len": parse_int(row["max_queue_len"]),
+                "active_nodes": parse_int(row["active_nodes"]),
             }
         )
 
@@ -207,12 +257,10 @@ def analyze_queue_lengths(
     if rows:
         xs = [row["window_start"] for row in rows]
         avg_queue = [row["avg_queue_len"] for row in rows]
-        p95_queue = [row["p95_queue_len"] for row in rows]
         max_queue = [row["max_queue_len"] for row in rows]
 
         plt.figure(figsize=(9, 5))
         plt.plot(xs, avg_queue, label="avg")
-        plt.plot(xs, p95_queue, label="p95")
         plt.plot(xs, max_queue, label="max")
         plt.xlabel("Simulation time")
         plt.ylabel("Queue length")
@@ -223,6 +271,57 @@ def analyze_queue_lengths(
         plt.close()
 
     return time_weighted_summary
+
+
+def analyze_clock_state(
+    snapshot_samples: list[dict[str, str]],
+    window: float,
+    output_dir: Path,
+) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    for row in snapshot_samples:
+        rows.append(
+            {
+                "window_start": parse_float(row["t"]),
+                "avg_state_size": parse_float(row["avg_state_size"]),
+                "max_state_size": parse_int(row["max_state_size"]),
+                "avg_stale_state_entries": parse_float(row["avg_stale_state_entries"]),
+                "avg_stale_state_fraction": parse_float(row["avg_stale_state_fraction"]),
+                "active_nodes": parse_int(row["active_nodes"]),
+            }
+        )
+
+    write_csv(output_dir / "clock_state_over_time.csv", rows)
+
+    if rows:
+        xs = [row["window_start"] for row in rows]
+        state_size = [row["avg_state_size"] for row in rows]
+        stale_entries = [row["avg_stale_state_entries"] for row in rows]
+
+        plt.figure(figsize=(9, 5))
+        plt.plot(xs, state_size, label="avg state size")
+        plt.plot(xs, stale_entries, label="avg stale state entries")
+        plt.xlabel("Simulation time")
+        plt.ylabel("Clock state")
+        plt.title("Clock State Growth Under Churn")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / "clock_state_over_time.png", dpi=150)
+        plt.close()
+
+    all_state_sizes = [parse_float(row["avg_state_size"]) for row in snapshot_samples]
+    all_stale_entries = [parse_float(row["avg_stale_state_entries"]) for row in snapshot_samples]
+    all_stale_fractions = [parse_float(row["avg_stale_state_fraction"]) for row in snapshot_samples]
+    return {
+        "avg_state_size": round(mean(all_state_sizes), 3) if all_state_sizes else 0.0,
+        "p95_state_size": round(percentile(all_state_sizes, 0.95), 3),
+        "avg_stale_state_entries": round(mean(all_stale_entries), 3)
+        if all_stale_entries
+        else 0.0,
+        "avg_stale_state_fraction": round(mean(all_stale_fractions), 3)
+        if all_stale_fractions
+        else 0.0,
+    }
 
 
 def analyze_latency(
@@ -328,9 +427,45 @@ def build_report_table(sections: dict[str, dict[str, object]], output_dir: Path)
     (output_dir / "report_metrics_summary.json").write_text(json.dumps(sections, indent=2))
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze a simulator run.")
-    parser.add_argument("--input-dir", default="out")
+def analyze_run(
+    input_dir: Path,
+    run_name: str,
+    window: float,
+    output_dir: Path,
+) -> dict[str, dict[str, object]]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sends = load_csv(input_dir / f"{run_name}_sends.csv")
+    deliveries = load_csv(input_dir / f"{run_name}_deliveries.csv")
+    queue_samples = load_csv(input_dir / f"{run_name}_queue_samples.csv")
+    snapshot_samples = load_csv(input_dir / f"{run_name}_snapshot_samples.csv")
+    throughput_samples = load_csv(input_dir / f"{run_name}_throughput_samples.csv")
+
+    sections = {
+        "metadata_growth": analyze_metadata_growth(sends, window, output_dir),
+        "stale_metadata": analyze_stale_metadata(sends, window, output_dir),
+        "queue_length": analyze_queue_lengths(queue_samples, snapshot_samples, window, output_dir),
+        "clock_state": analyze_clock_state(snapshot_samples, window, output_dir),
+        "latency": analyze_latency(deliveries, output_dir),
+        "throughput": analyze_throughput(throughput_samples, window, output_dir),
+    }
+    build_report_table(sections, output_dir)
+    return sections
+
+
+def build_parser() -> configargparse.ArgParser:
+    parser = configargparse.ArgParser(
+        description="Analyze a simulator run.",
+        default_config_files=["configs/analyze.yaml"],
+        config_file_parser_class=configargparse.YAMLConfigFileParser,
+    )
+    parser.add(
+        "-c",
+        "--config",
+        is_config_file=True,
+        help="Path to a YAML config file.",
+    )
+    parser.add_argument("--input-dir", default="output/runs")
     parser.add_argument("--run-name", default="run")
     parser.add_argument("--window", type=float, default=25.0)
     parser.add_argument("--output-dir", default=None)
@@ -341,20 +476,7 @@ def main() -> None:
     args = build_parser().parse_args()
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir) if args.output_dir else input_dir / f"{args.run_name}_analysis"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    sends = load_csv(input_dir / f"{args.run_name}_sends.csv")
-    deliveries = load_csv(input_dir / f"{args.run_name}_deliveries.csv")
-    queue_samples = load_csv(input_dir / f"{args.run_name}_queue_samples.csv")
-    throughput_samples = load_csv(input_dir / f"{args.run_name}_throughput_samples.csv")
-
-    sections = {
-        "metadata_growth": analyze_metadata_growth(sends, args.window, output_dir),
-        "queue_length": analyze_queue_lengths(queue_samples, args.window, output_dir),
-        "latency": analyze_latency(deliveries, output_dir),
-        "throughput": analyze_throughput(throughput_samples, args.window, output_dir),
-    }
-    build_report_table(sections, output_dir)
+    analyze_run(input_dir, args.run_name, args.window, output_dir)
 
 
 if __name__ == "__main__":
