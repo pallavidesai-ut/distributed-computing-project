@@ -1,0 +1,29 @@
+clocks:
+  - vector
+  - dvv
+  - lease_dvv
+profiles:
+  - stable
+  - low
+  - sustained
+  - burst
+  
+seeds:
+  - 7
+  - 17
+  - 29
+sim-time: 360.0
+initial-size: 12
+write-interval: 30.0
+max-nodes: 36
+min-nodes: 5
+min-lat: 1.0
+max-lat: 5.0
+key-count: 12
+hot-key-probability: 0.35
+replication-fanout: 4
+sample-interval: 12.0
+lease-duration: 12.0
+analysis-window: 15.0
+output-dir: output/experiments
+experiment-name: churn_report_v2
