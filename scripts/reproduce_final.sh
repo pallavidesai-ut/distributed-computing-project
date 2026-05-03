@@ -28,7 +28,7 @@ config = yaml.safe_load(Path(sys.argv[1]).read_text()) or {}
 print(config.get("experiment-name", "per_object_clock_study_final"))
 PY
 )"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-${BASE_EXPERIMENT_NAME}_${RUN_STAMP}}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${RUN_STAMP}_${BASE_EXPERIMENT_NAME}}"
 
 # Optional one-off archival of an existing same-name run before regeneration:
 #   ARCHIVE_EXISTING=1 scripts/reproduce_final.sh configs/final_study.yaml
@@ -51,4 +51,12 @@ if [[ $# -gt 0 ]]; then
   "$PYTHON" run_experiments.py --config "$CONFIG_PATH" "$@" --experiment-name "$EXPERIMENT_NAME"
 else
   "$PYTHON" run_experiments.py --config "$CONFIG_PATH" --experiment-name "$EXPERIMENT_NAME"
+fi
+
+mkdir -p "$OUTPUT_PATH"
+cp "$CONFIG_PATH" "$OUTPUT_PATH/source_config.yaml"
+
+if [[ "${SKIP_ORGANIZE:-0}" != "1" ]]; then
+  "$PYTHON" scripts/organize_experiment.py "$OUTPUT_PATH"
+  echo "  organized: $OUTPUT_PATH"
 fi

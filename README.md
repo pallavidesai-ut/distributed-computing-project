@@ -36,13 +36,21 @@ scripts/reproduce_final.sh configs/final_study.yaml
 scripts/reproduce_final.sh configs/final_study.yaml --seeds 1 --sim-time 60
 ```
 
-The script writes results under `output/experiments/per_object_clock_study_final_<timestamp>/`.
+The script writes organized results under `output/experiments/<timestamp>_per_object_clock_study_final/`.
+
+Run optional follow-up sweeps for the report:
+
+```bash
+scripts/reproduce_sensitivity.sh   # client-count and replication-factor sensitivity
+scripts/reproduce_extremes.sh      # stress scenarios that amplify clock differences
+```
 
 ## Study Notes
 
 - Design summary: [docs/clock_study_design.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/clock_study_design.md)
 - Assumptions and open questions: [docs/assumptions_and_questions.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/assumptions_and_questions.md)
 - Simulator evolution log: [docs/simulator_evolution.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/simulator_evolution.md)
+- Simulator methodology: [docs/simulator_methodology.md](docs/simulator_methodology.md)
 - Paper plan: [docs/paper_plan.md](docs/paper_plan.md)
 - Results workflow: [docs/results_workflow.md](docs/results_workflow.md)
 - Draft report: [docs/report_draft.tex](docs/report_draft.tex)

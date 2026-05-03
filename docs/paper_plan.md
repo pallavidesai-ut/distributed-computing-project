@@ -496,6 +496,51 @@ Include:
 - path to generated CSVs
 - note that metadata bytes are JSON serialization bytes excluding the clock type label
 
+## Additional Sensitivity and Stress Configurations
+
+The repo includes optional configs for report-strengthening follow-up experiments.
+
+### Client-count sensitivity
+
+Purpose: show that exact client-actor VV becomes more expensive as writer cardinality increases, while DVV is less sensitive because dots are replica-issued.
+
+Configs:
+
+- `configs/sensitivity_client_count_32.yaml`: low writer-cardinality comparison.
+- `configs/sensitivity_client_count_512.yaml`: high writer-cardinality comparison.
+
+Run both, plus replication-factor sensitivity, with:
+
+```bash
+scripts/reproduce_sensitivity.sh
+```
+
+### Replication-factor sensitivity
+
+Purpose: test how partial-replication fanout changes context width, visibility, and sibling pressure.
+
+Configs:
+
+- `configs/sensitivity_rf3.yaml`: lower fanout than the main RF=4 study.
+- `configs/sensitivity_rf5.yaml`: higher fanout than the main RF=4 study.
+
+### Extreme stress scenarios
+
+Purpose: make qualitative differences more visible for report discussion and appendix figures.
+
+Configs:
+
+- `configs/extreme_hotspot_churn.yaml`: high hot-key contention, many clients, more burst writers, and sustained/burst churn. This should amplify VV growth, lease pruning, and stale-sibling pressure.
+- `configs/extreme_sparse_replication.yaml`: low replication factor, many clients, higher latency, and weaker merge visibility. This should amplify divergence and conflict-resolution differences.
+
+Run both with:
+
+```bash
+scripts/reproduce_extremes.sh
+```
+
+These stress scenarios should be reported as stress tests, not as the primary balanced workload.
+
 ## Draft Abstract Template
 
 > Exact causality tracking remains difficult to scale because vector-clock metadata grows with the number of tracked actors. In replicated key-value stores, this pressure is amplified by churn and hot-object contention, where object histories can outlive the sessions or replicas that created them. We present a discrete-event simulator for per-object causality metadata that records both ground-truth read/write ancestry and clock-encoded ancestry, enabling direct measurement of metadata cost and semantic error. We compare exact client-actor Version Vectors, exact Dotted Version Vectors, lease-pruned Dotted Version Vectors, and a coarse vnode Version Vector baseline across stable, low, sustained, and burst churn profiles. In our fair client-actor workload, exact DVV preserves VV's perfect ancestry precision and recall while reducing average metadata by roughly 52--60% across churn profiles. Lease-pruned DVV reduces metadata further but introduces recall loss and stale-sibling risk, exposing an explicit metadata-versus-correctness operating curve. These results support treating DVV as an exact per-object metadata optimization and lease-DVV as an approximate tunable mechanism rather than a correctness-preserving replacement.
@@ -506,9 +551,14 @@ Include:
 
 ## Immediate TODO Checklist
 
-- [ ] Regenerate final experiment matrix after code cleanup.
-- [ ] Verify exact VV and DVV precision/recall are 1.0.
-- [ ] Export final plots as PDF/PNG for LaTeX.
+- [x] Regenerate final experiment matrix after code cleanup.
+- [x] Verify exact VV and DVV precision/recall are 1.0.
+- [x] Export final plots as PNG for report review.
+- [x] Add simulator methodology documentation.
+- [ ] Add error bars or confidence intervals to aggregate plots.
+- [ ] Run replication-factor sensitivity, especially 3 vs 5.
+- [ ] Run client-count sensitivity to emphasize VV actor-cardinality cost.
+- [ ] Add deterministic same-replica concurrency example showing DVV vs `vv_vnode`.
 - [ ] Rewrite `docs/report_draft.tex` using current simulator design.
 - [ ] Add real BibTeX citations from the deep research report.
 - [ ] Add threats-to-validity section.

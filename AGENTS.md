@@ -45,7 +45,7 @@ scripts/reproduce_final.sh configs/final_study.yaml \
 The final workflow writes timestamped results under:
 
 ```text
-output/experiments/per_object_clock_study_final_<timestamp>/
+output/experiments/<timestamp>_per_object_clock_study_final/
 ```
 
 ## Result handling
@@ -74,6 +74,54 @@ If final figures/tables must be versioned, copy only selected publication artifa
 - `scripts/reproduce_final.sh`: main timestamped experiment runner.
 - `docs/paper_plan.md`: publication plan.
 - `docs/results_workflow.md`: results organization guidance.
+
+## Required agent workflow
+
+Follow this order for every non-trivial change:
+
+1. **Update**
+   - Make the requested code, config, script, test, or documentation changes.
+   - Keep edits focused on the user's request.
+   - Do not overwrite unrelated user work.
+
+2. **Run tests**
+   - Run the full test suite before claiming the work is complete:
+
+   ```bash
+   pytest -q
+   ```
+
+   - If the change touches the experiment workflow, also run a small smoke matrix instead of the full final matrix:
+
+   ```bash
+   scripts/reproduce_final.sh configs/final_study.yaml \
+     --profiles stable --clocks vv dvv --seeds 1 --sim-time 10
+   ```
+
+3. **Verify outputs**
+   - Check that expected files were produced.
+   - For experiment workflow changes, verify at least:
+     - `manifest.json`
+     - `config/experiment_config.json`
+     - `aggregate/comparison_by_clock.csv`
+     - `aggregate/comparison_runs.csv`
+     - one aggregate plot such as `figures/metadata_bytes_vs_profile.png`
+     - `time_series/` plots when relevant
+     - per-run files under `runs/<run_name>/raw/` and `runs/<run_name>/analysis/`
+   - Remove transient caches such as `__pycache__/` before committing.
+
+4. **Summarize results to the user**
+   - Tell the user exactly what changed.
+   - Report test results.
+   - If experiments were run, provide the output directory and summarize what the plots/results show.
+   - Ask for confirmation before committing if the user has not already requested a commit/push.
+
+5. **Commit and push only when requested or after confirmation**
+   - Inspect `git status --short`.
+   - Stage only intended files.
+   - Commit with a concise message.
+   - Push to the current working branch, usually `origin codex/dvv`.
+   - Report the commit hash and push target.
 
 ## Testing expectations
 

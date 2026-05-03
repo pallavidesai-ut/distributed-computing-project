@@ -2,21 +2,44 @@
 
 ## What the experiment runner produces
 
-`run_experiments.py` generates both tabular results and plots. Each run directory contains raw CSVs, configs, summaries, and per-run analysis plots. The top-level experiment directory contains aggregate CSVs, report notes, and comparison plots.
+`run_experiments.py` first generates tabular results and plots. `scripts/reproduce_final.sh` then calls `scripts/organize_experiment.py` to reorganize the completed run into a paper-friendly bundle.
 
-Important top-level outputs:
+Organized experiment layout:
 
-- `experiment_config.json`
-- `comparison_runs.csv`
-- `comparison_by_clock.csv`
-- `lease_duration_ablation.csv`
-- `metadata_reduction_vs_recall_loss.csv`
-- `study_report.md`
-- `*_vs_profile.png`
-- `metadata_reduction_vs_recall_loss.png`
-- `lease_ablation_*.png`
-- `time_series_report/*.csv`
-- `time_series_report/*.png`
+```text
+output/experiments/<timestamp>_<experiment_name>/
+  README.md
+  manifest.json
+  config/
+    source_config.yaml
+    experiment_config.json
+  aggregate/
+    comparison_runs.csv
+    comparison_by_clock.csv
+    lease_duration_ablation.csv
+    metadata_reduction_vs_recall_loss.csv
+  figures/
+    *_vs_profile.png
+    lease_ablation_*.png
+    metadata_reduction_vs_recall_loss.png
+  time_series/
+    *.csv
+    *.png
+  runs/
+    stable_vv_seed1/
+      raw/
+        *_writes.csv
+        *_accuracy.csv
+        *_decisions.csv
+        ...
+      analysis/
+        *.csv
+        *.png
+      *_config.json
+      *_summary.json
+```
+
+Use `aggregate/`, `figures/`, and `time_series/` for paper-level results. Use `runs/` when inspecting an individual profile/clock/seed run.
 
 ## Timestamped runs
 
@@ -29,7 +52,7 @@ scripts/reproduce_final.sh
 By default this reads `configs/final_study.yaml` and writes to a timestamped experiment name such as:
 
 ```text
-output/experiments/per_object_clock_study_final_2026-05-02_22-21-26/
+output/experiments/2026-05-02_22-21-26_per_object_clock_study_final/
 ```
 
 Use a custom config:
@@ -61,13 +84,13 @@ ARCHIVE_EXISTING=1 EXPERIMENT_NAME=paper_submission_main scripts/reproduce_final
 
 ## Better long-term storage/viewing options
 
-For a small paper artifact, the current structure is acceptable if every final run has:
+For a small paper artifact, the organized timestamped directory is acceptable if every final run has:
 
 - timestamped output directory
-- saved config JSON
-- aggregate CSVs
-- generated plots
-- git commit hash in the paper or manifest
+- saved source and resolved configs under `config/`
+- aggregate CSVs under `aggregate/`
+- generated plots under `figures/` and `time_series/`
+- git commit hash in `manifest.json`
 
 For a larger project, common experiment-tracking practices are:
 
