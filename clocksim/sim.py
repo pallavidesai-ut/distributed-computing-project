@@ -16,6 +16,7 @@ from __future__ import annotations
 import heapq
 import json
 import random
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -103,8 +104,10 @@ class Cluster:
         self.nodes: list[Node] = []
         self.node_counter = 0
         self.version_counter = 0
-        self.session_counter = 0
         self.clients = [f"c{index:04d}" for index in range(1, workload.client_count + 1)]
+        self.client_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
 
         for _ in range(initial_size):
             self._add_node()
@@ -130,9 +133,30 @@ class Cluster:
     def choose_client(self) -> str:
         return random.choice(self.clients)
 
-    def allocate_session_actor(self) -> str:
-        self.session_counter += 1
-        return f"{self.choose_client()}.s{self.session_counter:06d}"
+    def allocate_write_actor(self) -> str:
+        """Choose the logical writer actor for exact client VV.
+
+        Earlier versions allocated a fresh session actor for every write, which
+        made the exact VV baseline grow almost one actor per event. Reusing the
+        configured client pool gives a bounded, fairer vanilla-VV baseline for
+        report comparisons. Replica-actor clocks ignore this value.
+        """
+        return self.choose_client()
+
+    def context_for_client(
+        self,
+        actor_id: str,
+        key: str,
+        read_versions: list[VersionRecord],
+    ) -> list[VersionRecord]:
+        """Combine object-store reads with the client's carried session context."""
+        by_id = {version.version_id: version for version in read_versions}
+        for version in self.client_versions[actor_id][key]:
+            by_id.setdefault(version.version_id, version)
+        return list(by_id.values())
+
+    def remember_client_version(self, actor_id: str, version: VersionRecord) -> None:
+        self.client_versions[actor_id][version.key] = [version]
 
     def replication_targets(self, coordinator: Node) -> list[Node]:
         peers = [node for node in self.active_nodes() if node.id != coordinator.id]
@@ -200,6 +224,7 @@ class Cluster:
         )
 
         coordinator.apply_version(version)
+        self.remember_client_version(actor_id, version)
         self._record_accuracy(version)
         represented_context = version.stamp.represented_context()
         targets = self.replication_targets(coordinator)
@@ -254,27 +279,26 @@ class Cluster:
             coordinator = self.choose_node()
             if coordinator is not None:
                 key = self.choose_key()
-                client_id = self.allocate_session_actor()
-                read_versions = coordinator.read(key)
-                phase = "merge" if len(read_versions) > 1 and random.random() < self.workload.merge_probability else "background"
+                client_id = self.allocate_write_actor()
                 target_node = coordinator
 
                 def commit() -> None:
-                    if not target_node.active:
+                    write_node = target_node
+                    if not write_node.active:
                         fallback = self.choose_node()
                         if fallback is None:
                             return
-                        self.execute_write(
-                            key=key,
-                            coordinator=fallback,
-                            context_versions=read_versions,
-                            phase=phase,
-                            actor_id=client_id,
-                        )
-                        return
+                        write_node = fallback
+                    read_versions = self.context_for_client(client_id, key, write_node.read(key))
+                    phase = (
+                        "merge"
+                        if len(read_versions) > 1
+                        and random.random() < self.workload.merge_probability
+                        else "background"
+                    )
                     self.execute_write(
                         key=key,
-                        coordinator=target_node,
+                        coordinator=write_node,
                         context_versions=read_versions,
                         phase=phase,
                         actor_id=client_id,
@@ -297,7 +321,7 @@ class Cluster:
                 writers = max(2, self.workload.burst_writers)
                 for _ in range(writers):
                     coordinator = anchor
-                    client_id = self.allocate_session_actor()
+                    client_id = self.allocate_write_actor()
                     if random.random() > self.workload.same_coordinator_probability:
                         alternative = self.choose_node()
                         if alternative is not None:
@@ -311,7 +335,7 @@ class Cluster:
                         self.execute_write(
                             key=key,
                             coordinator=target,
-                            context_versions=shared_context,
+                            context_versions=self.context_for_client(writer_id, key, shared_context),
                             phase="burst",
                             actor_id=writer_id,
                         )
@@ -322,12 +346,13 @@ class Cluster:
                     target = self.choose_node()
                     if target is None:
                         return
+                    actor_id = self.allocate_write_actor()
                     self.execute_write(
                         key=key,
                         coordinator=target,
-                        context_versions=target.read(key),
+                        context_versions=self.context_for_client(actor_id, key, target.read(key)),
                         phase="burst_merge",
-                        actor_id=self.allocate_session_actor(),
+                        actor_id=actor_id,
                     )
 
                 self.env.schedule(self.workload.merge_delay, merge_write)

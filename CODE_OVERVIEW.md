@@ -6,7 +6,7 @@ This project is a discrete-event simulator for a partially replicated key-value 
 
 The simulator compares causal metadata schemes for object versions:
 
-- `vv` — exact Version Vectors over client/session actors
+- `vv` — exact Version Vectors over bounded client actors
 - `vv_vnode` — production-style Version Vectors over replica/vnode actors
 - `dvv` — exact Dotted Version Vectors
 - `lease_dvv` — Dotted Version Vectors with lease-based write-time pruning
@@ -120,7 +120,7 @@ Each stamp can:
 Clock implementations are exposed through `ClockModel`:
 
 - `VersionVectorModel`
-  - exact per-object vector over client/session actors
+  - exact per-object vector over bounded client actors
 - `VnodeVersionVectorModel`
   - production-style vector over replica actors
   - can collapse distinct client writes through the same coordinator
@@ -175,7 +175,8 @@ Workload features:
 - partial replication
 - configurable replication factor
 - hot-key probability
-- client/session actor pool
+- bounded client actor pool
+- per-key client session context so repeated client writes remain causal for exact VV
 - background writes
 - explicit hot-key contention bursts
 - delayed merge writes
@@ -268,8 +269,8 @@ The simulator is functional, packaged as `clocksim/`, and produces report-orient
 output/experiments/per_object_clock_study/
 ```
 
-The latest full post-refactor validation run was written to:
+The latest full fair-VV validation run was written to:
 
 ```text
-output/experiments/per_object_clock_study_refactor/
+output/experiments/per_object_clock_study_fair_vv/
 ```
