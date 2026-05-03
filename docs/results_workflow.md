@@ -19,12 +19,13 @@ output/experiments/<timestamp>_<experiment_name>/
     lease_duration_ablation.csv
     metadata_reduction_vs_recall_loss.csv
   figures/
-    *_vs_profile.png
-    lease_ablation_*.png
-    metadata_reduction_vs_recall_loss.png
+    *_vs_profile.png/.pdf
+    lease_ablation_*.png/.pdf
+    metadata_reduction_vs_recall_loss.png/.pdf
+    same_replica_concurrency_example.png/.pdf
   time_series/
     *.csv
-    *.png
+    *.png/.pdf
   runs/
     stable_vv_seed1/
       raw/
@@ -39,7 +40,7 @@ output/experiments/<timestamp>_<experiment_name>/
       *_summary.json
 ```
 
-Use `aggregate/`, `figures/`, and `time_series/` for paper-level results. Use `runs/` when inspecting an individual profile/clock/seed run.
+Use `aggregate/`, `figures/`, and `time_series/` for paper-level results. Use `runs/` when inspecting an individual profile/clock/seed run. Aggregate bar/line plots include standard-error bars across seeds when multiple seeds are present.
 
 ## Timestamped runs
 

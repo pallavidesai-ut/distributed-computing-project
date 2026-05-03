@@ -555,10 +555,10 @@ These stress scenarios should be reported as stress tests, not as the primary ba
 - [x] Verify exact VV and DVV precision/recall are 1.0.
 - [x] Export final plots as PNG for report review.
 - [x] Add simulator methodology documentation.
-- [ ] Add error bars or confidence intervals to aggregate plots.
+- [x] Add standard-error bars to aggregate plots.
 - [ ] Run replication-factor sensitivity, especially 3 vs 5.
 - [ ] Run client-count sensitivity to emphasize VV actor-cardinality cost.
-- [ ] Add deterministic same-replica concurrency example showing DVV vs `vv_vnode`.
+- [x] Add deterministic same-replica concurrency example showing DVV vs `vv_vnode`.
 - [ ] Rewrite `docs/report_draft.tex` using current simulator design.
 - [ ] Add real BibTeX citations from the deep research report.
 - [ ] Add threats-to-validity section.

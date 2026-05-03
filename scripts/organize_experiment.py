@@ -18,6 +18,7 @@ AGGREGATE_CSVS = {
     "comparison_by_clock.csv",
     "lease_duration_ablation.csv",
     "metadata_reduction_vs_recall_loss.csv",
+    "same_replica_concurrency_example.csv",
 }
 
 ROOT_DOCS = {
@@ -179,8 +180,9 @@ def organize_experiment(experiment_dir: Path) -> None:
             move_file(file_path, aggregate_dir)
 
     # Top-level plots.
-    for file_path in list(experiment_dir.glob("*.png")):
-        move_file(file_path, figures_dir)
+    for pattern in ("*.png", "*.pdf"):
+        for file_path in list(experiment_dir.glob(pattern)):
+            move_file(file_path, figures_dir)
 
     # Source/resolved experiment configs.
     config_file = experiment_dir / "experiment_config.json"

@@ -14,7 +14,15 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
 import matplotlib.pyplot as plt
 
 from analyze_run import analyze_run
-from clocksim import CLOCK_FACTORIES, make_clock_factory, run_scenario, save_run
+from clocksim import (
+    CLOCK_FACTORIES,
+    CausalContext,
+    DottedVersionVectorModel,
+    VnodeVersionVectorModel,
+    make_clock_factory,
+    run_scenario,
+    save_run,
+)
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -38,8 +46,22 @@ def load_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def save_report_figure(fig: plt.Figure, output_path: Path) -> None:
+    fig.savefig(output_path, dpi=180)
+    if output_path.suffix.lower() != ".pdf":
+        fig.savefig(output_path.with_suffix(".pdf"))
+
+
 def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def sample_stderr(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    avg = mean(values)
+    variance = sum((value - avg) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance) / math.sqrt(len(values))
 
 
 def flatten_sections(sections: dict[str, dict[str, object]]) -> dict[str, object]:
@@ -96,6 +118,7 @@ def aggregate_runs(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             ]
             if values:
                 row[metric] = round(mean(values), 4)
+                row[f"{metric}.stderr"] = round(sample_stderr(values), 4)
         aggregated.append(row)
     return aggregated
 
@@ -120,6 +143,7 @@ def grouped_profile_bar_plot(
     plotted = False
     for idx, clock in enumerate(clocks):
         values: list[float] = []
+        errors: list[float] = []
         positions: list[float] = []
         for profile_index, profile in enumerate(profiles):
             match = next(
@@ -133,9 +157,18 @@ def grouped_profile_bar_plot(
                 None,
             )
             values.append(float(match[metric_key]) if match is not None else math.nan)
+            errors.append(float(match.get(f"{metric_key}.stderr", 0.0)) if match is not None else 0.0)
             positions.append(x_positions[profile_index] - 0.4 + (idx + 0.5) * width)
             plotted = plotted or match is not None
-        ax.bar(positions, values, width=width, label=clock)
+        ax.bar(
+            positions,
+            values,
+            width=width,
+            yerr=errors,
+            capsize=3,
+            error_kw={"linewidth": 1, "alpha": 0.8},
+            label=clock,
+        )
 
     if not plotted:
         plt.close(fig)
@@ -148,7 +181,7 @@ def grouped_profile_bar_plot(
     ax.grid(axis="y", alpha=0.25)
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_dir / filename, dpi=150)
+    save_report_figure(fig, output_dir / filename)
     plt.close(fig)
 
 
@@ -260,7 +293,7 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
         axes[-1].set_xlabel("Simulation time")
         fig.suptitle(title)
         fig.tight_layout()
-        fig.savefig(time_series_dir / filename, dpi=150)
+        save_report_figure(fig, time_series_dir / filename)
         plt.close(fig)
 
 
@@ -322,7 +355,7 @@ def make_tradeoff_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
     ax.set_title("Lease-DVV Tradeoff")
     ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(output_dir / "metadata_reduction_vs_recall_loss.png", dpi=150)
+    save_report_figure(fig, output_dir / "metadata_reduction_vs_recall_loss.png")
     plt.close(fig)
 
 
@@ -371,11 +404,13 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
             profile_rows.sort(key=lambda item: float(item["lease_duration"]))
             if not profile_rows:
                 continue
-            ax.plot(
+            ax.errorbar(
                 [float(row["lease_duration"]) for row in profile_rows],
                 [float(row[metric_key]) for row in profile_rows],
+                yerr=[float(row.get(f"{metric_key}.stderr", 0.0)) for row in profile_rows],
                 marker="o",
                 linewidth=2,
+                capsize=3,
                 label=profile,
             )
             plotted = True
@@ -388,8 +423,60 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
         ax.grid(alpha=0.25)
         ax.legend()
         fig.tight_layout()
-        fig.savefig(output_dir / filename, dpi=150)
+        save_report_figure(fig, output_dir / filename)
         plt.close(fig)
+
+
+def make_same_replica_concurrency_example(output_dir: Path) -> None:
+    """Create a deterministic example showing why dots matter."""
+    vnode = VnodeVersionVectorModel()
+    vnode_state = vnode.make_state("n1")
+    vnode_first = vnode.issue_stamp(vnode_state, "k0", CausalContext(), now=0.0, actor_id="client-a")
+    vnode_second = vnode.issue_stamp(vnode_state, "k0", CausalContext(), now=1.0, actor_id="client-b")
+
+    dvv = DottedVersionVectorModel()
+    dvv_state = dvv.make_state("n1")
+    dvv_first = dvv.issue_stamp(dvv_state, "k0", CausalContext(), now=0.0, actor_id="client-a")
+    dvv_second = dvv.issue_stamp(dvv_state, "k0", CausalContext(), now=1.0, actor_id="client-b")
+
+    rows = [
+        {
+            "clock": "dvv",
+            "actor_granularity": "replica dot",
+            "write_1_dot": str(dvv_first.dot),
+            "write_2_dot": str(dvv_second.dot),
+            "clock_relation_write2_vs_write1": dvv.compare_stamps(dvv_second, dvv_first),
+            "interpretation": "correctly preserves concurrency between independent writes",
+        },
+        {
+            "clock": "vv_vnode",
+            "actor_granularity": "replica vector entry",
+            "write_1_dot": str(vnode_first.dot),
+            "write_2_dot": str(vnode_second.dot),
+            "clock_relation_write2_vs_write1": vnode.compare_stamps(vnode_second, vnode_first),
+            "interpretation": "falsely orders independent same-replica writes",
+        },
+    ]
+    write_csv(output_dir / "same_replica_concurrency_example.csv", rows)
+
+    fig, ax = plt.subplots(figsize=(10, 2.8))
+    ax.axis("off")
+    table = ax.table(
+        cellText=[
+            [row["clock"], row["actor_granularity"], row["clock_relation_write2_vs_write1"], row["interpretation"]]
+            for row in rows
+        ],
+        colLabels=["Clock", "Actor granularity", "Relation: write 2 vs write 1", "Interpretation"],
+        loc="center",
+        cellLoc="left",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.7)
+    ax.set_title("Same-replica independent writes: DVV preserves concurrency, vnode-VV over-orders")
+    fig.tight_layout()
+    save_report_figure(fig, output_dir / "same_replica_concurrency_example.png")
+    plt.close(fig)
 
 
 def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> None:
@@ -413,6 +500,7 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
         )
     make_tradeoff_plot(rows, output_dir)
     make_lease_ablation_plots(rows, output_dir)
+    make_same_replica_concurrency_example(output_dir)
 
 
 def clock_track(clock: str) -> str:
