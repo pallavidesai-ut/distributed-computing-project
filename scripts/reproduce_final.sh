@@ -28,6 +28,43 @@ config = yaml.safe_load(Path(sys.argv[1]).read_text()) or {}
 print(config.get("experiment-name", "per_object_clock_study_final"))
 PY
 )"
+BASE_OUTPUT_DIR="$($PYTHON - "$CONFIG_PATH" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+config = yaml.safe_load(Path(sys.argv[1]).read_text()) or {}
+print(config.get("output-dir", "output/experiments"))
+PY
+)"
+
+resolve_output_dir() {
+  local default_dir="$1"
+  shift
+  local candidate="${OUTPUT_DIR:-$default_dir}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output-dir)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --output-dir" >&2
+          exit 1
+        fi
+        candidate="$2"
+        shift 2
+        ;;
+      --output-dir=*)
+        candidate="${1#--output-dir=}"
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  printf '%s\n' "$candidate"
+}
+
+OUTPUT_DIR_ROOT="$(resolve_output_dir "$BASE_OUTPUT_DIR" "$@")"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-${RUN_STAMP}_${BASE_EXPERIMENT_NAME}}"
 
 # Optional one-off archival of an existing same-name run before regeneration:
@@ -35,13 +72,13 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-${RUN_STAMP}_${BASE_EXPERIMENT_NAME}}"
 if [[ "${ARCHIVE_EXISTING:-0}" == "1" ]]; then
   ARCHIVE_DIR="output/archive/${RUN_STAMP}"
   mkdir -p "$ARCHIVE_DIR"
-  if [[ -d "output/experiments/$EXPERIMENT_NAME" ]]; then
-    mv "output/experiments/$EXPERIMENT_NAME" "$ARCHIVE_DIR/"
+  if [[ -d "$OUTPUT_DIR_ROOT/$EXPERIMENT_NAME" ]]; then
+    mv "$OUTPUT_DIR_ROOT/$EXPERIMENT_NAME" "$ARCHIVE_DIR/"
     echo "Archived existing run to $ARCHIVE_DIR/$EXPERIMENT_NAME"
   fi
 fi
 
-OUTPUT_PATH="$(pwd)/output/experiments/$EXPERIMENT_NAME"
+OUTPUT_PATH="$(pwd)/$OUTPUT_DIR_ROOT/$EXPERIMENT_NAME"
 
 echo "Running final experiment matrix"
 echo "  config: $CONFIG_PATH"

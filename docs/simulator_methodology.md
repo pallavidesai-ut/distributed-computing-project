@@ -102,6 +102,16 @@ This is the main exact optimization under study.
 
 This is an approximate/tunable design, not a correctness-preserving replacement for exact DVV.
 
+### Membership-aware lease DVV: `membership_lease_dvv`
+
+- Starts from the DVV representation.
+- Keeps all currently active replica actors, even if they have been quiet longer than the lease duration.
+- Starts the lease countdown only when a replica actor leaves active membership.
+- Expected behavior: stable profiles should behave close to exact DVV, while churn profiles can prune departed replica actors after the grace period.
+- Expected cost: less metadata reduction than fixed lease-DVV in quiet/stable periods, but better recall and lower stale-sibling pressure.
+
+This is a more production-style approximation than fixed lease-DVV because it targets departed actors rather than quiet actors.
+
 ### Coarse vnode Version Vector: `vv_vnode`
 
 - Actor identity: replica/vnode actor.

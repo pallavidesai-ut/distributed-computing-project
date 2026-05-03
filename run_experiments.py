@@ -79,8 +79,12 @@ def lease_duration_label(lease_duration: float) -> str:
     return f"L{text}"
 
 
+def is_lease_clock(clock: str) -> bool:
+    return clock in {"lease_dvv", "membership_lease_dvv"}
+
+
 def clock_variant(clock: str, lease_duration: float, lease_duration_count: int) -> str:
-    if clock == "lease_dvv" and lease_duration_count > 1:
+    if is_lease_clock(clock) and lease_duration_count > 1:
         return f"{clock}_{lease_duration_label(lease_duration)}"
     return clock
 
@@ -365,7 +369,7 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
     lease_rows = [
         row
         for row in rows
-        if str(row.get("clock_family", row["clock"])) == "lease_dvv"
+        if is_lease_clock(str(row.get("clock_family", row["clock"])))
         and isinstance(row.get("lease_duration"), (int, float))
     ]
     if not lease_rows:
@@ -787,7 +791,7 @@ def main() -> None:
     run_rows: list[dict[str, object]] = []
     for profile in args.profiles:
         for clock in args.clocks:
-            clock_lease_durations = lease_durations if clock == "lease_dvv" else [lease_durations[0]]
+            clock_lease_durations = lease_durations if is_lease_clock(clock) else [lease_durations[0]]
             for lease_duration in clock_lease_durations:
                 variant = clock_variant(clock, lease_duration, len(clock_lease_durations))
                 for seed in args.seeds:
@@ -823,7 +827,7 @@ def main() -> None:
                         "clock": clock,
                         "clock_variant": variant,
                         "seed": seed,
-                        "lease_duration": lease_duration if clock == "lease_dvv" else None,
+                        "lease_duration": lease_duration if is_lease_clock(clock) else None,
                     }
                     save_run(
                         metrics,
@@ -843,7 +847,7 @@ def main() -> None:
                         "profile": profile,
                         "clock": variant,
                         "clock_family": clock,
-                        "lease_duration": lease_duration if clock == "lease_dvv" else "",
+                        "lease_duration": lease_duration if is_lease_clock(clock) else "",
                         "seed": seed,
                         "run_name": run_name,
                         "run_dir": str(run_dir),

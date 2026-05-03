@@ -1,6 +1,6 @@
 # distributed-computing-project
 
-Per-object causality simulator for comparing `VV`, `DVV`, and `lease-DVV` under churn.
+Per-object causality simulator for comparing `VV`, `DVV`, `lease-DVV`, and membership-aware lease-DVV under churn.
 
 ## Entry Points
 
@@ -44,6 +44,7 @@ Run optional follow-up sweeps for the report:
 ```bash
 scripts/reproduce_sensitivity.sh   # client-count and replication-factor sensitivity
 scripts/reproduce_extremes.sh      # stress scenarios that amplify clock differences
+scripts/reproduce_final.sh configs/membership_lease_study.yaml
 ```
 
 ## Study Notes

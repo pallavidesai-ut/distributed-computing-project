@@ -38,6 +38,7 @@ A controlled comparison of:
 - `vv`: exact client-actor Version Vector
 - `dvv`: exact Dotted Version Vector
 - `lease_dvv_L8`, `lease_dvv_L16`, `lease_dvv_L32`: approximate lease-pruned DVV variants
+- `membership_lease_dvv`: membership-aware lease pruning that targets departed replica actors
 - `vv_vnode`: coarse replica/vnode actor Version Vector, treated as a production-style baseline or appendix result
 
 ### Main Result Shape
@@ -158,6 +159,13 @@ Important design novelty:
 - Lease is renewed when stamps are observed.
 - Correctness expectation: may lose ancestry recall.
 - Cost expectation: smaller metadata, especially under churn.
+
+#### Membership-aware Lease-DVV
+
+- Same DVV representation but keeps active replica actors regardless of quiet time.
+- Starts the expiration window when a replica actor leaves active membership.
+- Correctness expectation: closer to exact DVV in stable periods; approximate after churn grace periods expire.
+- Cost expectation: less aggressive than fixed lease-DVV, but better aligned with the churn/stale-actor motivation.
 
 #### Vnode-VV
 

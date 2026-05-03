@@ -201,6 +201,9 @@ class Cluster:
         phase: str,
         actor_id: str,
     ) -> None:
+        update_active_actors = getattr(self.clock_model, "update_active_actors", None)
+        if update_active_actors is not None:
+            update_active_actors(self.active_node_ids(), self.env.now)
         read_context = self.clock_model.build_read_context(context_versions)
         stamp = self.clock_model.issue_stamp(
             coordinator.state,

@@ -222,7 +222,7 @@ def organize_experiment(experiment_dir: Path) -> None:
 
 def main() -> None:
     if len(sys.argv) != 2:
-        raise SystemExit("Usage: scripts/organize_experiment.py output/experiments/<experiment_dir>")
+        raise SystemExit("Usage: scripts/organize_experiment.py <experiment_dir>")
     organize_experiment(Path(sys.argv[1]))
 
 

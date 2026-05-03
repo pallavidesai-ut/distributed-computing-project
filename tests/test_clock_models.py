@@ -5,6 +5,7 @@ from clocksim import (
     Dot,
     DottedVersionVectorModel,
     LeaseDottedVersionVectorModel,
+    MembershipLeaseDottedVersionVectorModel,
     VersionVectorModel,
     VnodeVersionVectorModel,
 )
@@ -69,6 +70,33 @@ def test_expired_lease_dvv_prunes_metadata_and_loses_recall_shape() -> None:
     represented = pruned_stamp.represented_context().materialize()
     truth = exact_stamp.represented_context().materialize()
     assert represented < truth
+
+
+def test_membership_lease_dvv_keeps_quiet_active_actors() -> None:
+    read_context = CausalContext(prefix={"n2": 4})
+    model = MembershipLeaseDottedVersionVectorModel(lease_duration=1.0)
+    state = model.make_state("n1")
+    model.update_active_actors({"n1", "n2"}, now=0.0)
+
+    stamp = model.issue_stamp(state, "k0", read_context, now=100.0, actor_id="client-a")
+
+    assert not stamp.was_pruned()
+    assert stamp.represented_context().contains(Dot("n2", 4))
+
+
+def test_membership_lease_dvv_prunes_departed_actor_after_grace_period() -> None:
+    read_context = CausalContext(prefix={"n2": 4})
+    model = MembershipLeaseDottedVersionVectorModel(lease_duration=5.0)
+    state = model.make_state("n1")
+    model.update_active_actors({"n1", "n2"}, now=0.0)
+    model.update_active_actors({"n1"}, now=10.0)
+
+    retained = model.issue_stamp(state, "k0", read_context, now=12.0, actor_id="client-a")
+    pruned = model.issue_stamp(state, "k0", read_context, now=20.0, actor_id="client-a")
+
+    assert retained.represented_context().contains(Dot("n2", 4))
+    assert pruned.was_pruned()
+    assert not pruned.represented_context().contains(Dot("n2", 4))
 
 
 def test_shorter_lease_prunes_at_least_as_much_as_longer_lease() -> None:

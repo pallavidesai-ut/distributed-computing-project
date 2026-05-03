@@ -316,6 +316,81 @@ class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
         return stamp
 
 
+class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
+    """DVV that prunes only actors that have left membership and aged out.
+
+    This keeps active replica actors regardless of how recently they were
+    observed, so stable clusters behave like exact DVV. Once an actor leaves,
+    its context is retained for ``lease_duration`` before it can be pruned.
+    """
+
+    name = "membership_lease_dvv"
+
+    def __init__(self, lease_duration: float) -> None:
+        self.lease_duration = lease_duration
+        self.active_actors: set[str] = set()
+        self.departure_expiry: dict[str, float] = {}
+
+    def update_active_actors(self, active_actors: set[str], now: float) -> None:
+        previously_active = set(self.active_actors)
+        self.active_actors = set(active_actors)
+        for actor in previously_active - self.active_actors:
+            self.departure_expiry[actor] = now + self.lease_duration
+        for actor in self.active_actors:
+            self.departure_expiry.pop(actor, None)
+
+    def _actor_is_live(self, actor: str, local_actor: str, now: float) -> bool:
+        if actor == local_actor:
+            return True
+        if actor in self.active_actors:
+            return True
+        return self.departure_expiry.get(actor, float("-inf")) > now
+
+    def issue_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        read_context: CausalContext,
+        now: float,
+        actor_id: str,
+    ) -> BaseStamp:
+        compacted = compact_context(read_context.prefix, set(read_context.dots))
+        live_prefix: dict[str, int] = {}
+        live_dots: set[Dot] = set()
+        pruned_actors: set[str] = set()
+        pruned_events = 0
+
+        for actor, counter in compacted.prefix.items():
+            if self._actor_is_live(actor, state.node_id, now):
+                live_prefix[actor] = counter
+            else:
+                pruned_actors.add(actor)
+                pruned_events += counter
+
+        for dot in compacted.dots:
+            if self._actor_is_live(dot.actor, state.node_id, now):
+                live_dots.add(dot)
+            else:
+                pruned_actors.add(dot.actor)
+                pruned_events += 1
+
+        live_context = compact_context(live_prefix, live_dots)
+        next_counter = max(
+            state.local_counters.get(key, 0),
+            live_context.max_counter(state.node_id),
+        ) + 1
+        state.local_counters[key] = next_counter
+        dot = Dot(state.node_id, next_counter)
+        return DVVStamp(
+            summary=dict(live_context.prefix),
+            exceptions=set(live_context.dots),
+            new_dot=dot,
+            type_name=self.name,
+            pruned_actors=len(pruned_actors),
+            pruned_events=pruned_events,
+        )
+
+
 
 def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], ClockModel]:
     if clock_name in {"vv", "vector"}:
@@ -326,12 +401,15 @@ def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], C
         return DottedVersionVectorModel
     if clock_name == "lease_dvv":
         return lambda: LeaseDottedVersionVectorModel(lease_duration=lease_duration)
+    if clock_name in {"membership_lease_dvv", "churn_aware_lease_dvv"}:
+        return lambda: MembershipLeaseDottedVersionVectorModel(lease_duration=lease_duration)
     raise KeyError(f"Unknown clock: {clock_name}")
 
 
 CLOCK_FACTORIES: dict[str, Callable[[], ClockModel]] = {
     "dvv": DottedVersionVectorModel,
     "lease_dvv": lambda: LeaseDottedVersionVectorModel(lease_duration=60.0),
+    "membership_lease_dvv": lambda: MembershipLeaseDottedVersionVectorModel(lease_duration=60.0),
     "vector": VersionVectorModel,
     "vector_vnode": VnodeVersionVectorModel,
     "vv": VersionVectorModel,
