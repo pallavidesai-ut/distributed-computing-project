@@ -24,4 +24,4 @@ analyze-churn-run = "analyze_run:main"
 run-churn-experiments = "run_experiments:main"
 
 [tool.setuptools]
-py-modules = ["code", "analyze_run", "run_experiments"]
+py-modules = ["code", "clocksim", "analyze_run", "run_experiments"]
