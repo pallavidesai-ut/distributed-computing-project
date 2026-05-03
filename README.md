@@ -4,6 +4,7 @@ Per-object causality simulator for comparing `VV`, `DVV`, and `lease-DVV` under 
 
 ## Entry Points
 
+- `scripts/reproduce_final.sh` — main paper/reproducibility script
 - `python run_experiments.py`
 - `python simulate.py`
 - `python analyze_run.py`
@@ -22,18 +23,27 @@ Analyze one saved run:
 python analyze_run.py --input-dir output/runs --run-name lease_sustained
 ```
 
-Run the report-oriented experiment matrix, including lease-duration ablations:
+Run the main paper-oriented experiment matrix, including lease-duration ablations, timestamped output directories, aggregate tables, report notes, and figures:
 
 ```bash
-python run_experiments.py
+scripts/reproduce_final.sh
 ```
 
-The full matrix writes aggregate tables, generated report notes, and figures under `output/experiments/per_object_clock_study/`.
+Use a custom config or override parameters:
+
+```bash
+scripts/reproduce_final.sh configs/final_study.yaml
+scripts/reproduce_final.sh configs/final_study.yaml --seeds 1 --sim-time 60
+```
+
+The script writes results under `output/experiments/per_object_clock_study_final_<timestamp>/`.
 
 ## Study Notes
 
 - Design summary: [docs/clock_study_design.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/clock_study_design.md)
 - Assumptions and open questions: [docs/assumptions_and_questions.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/assumptions_and_questions.md)
 - Simulator evolution log: [docs/simulator_evolution.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/simulator_evolution.md)
-- Draft report: [docs/report_draft.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/report_draft.md)
+- Paper plan: [docs/paper_plan.md](docs/paper_plan.md)
+- Results workflow: [docs/results_workflow.md](docs/results_workflow.md)
+- Draft report: [docs/report_draft.tex](docs/report_draft.tex)
 - Proposal and pivot notes: [docs/DC Project Proposal.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/DC%20Project%20Proposal.md)

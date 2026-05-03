@@ -5,7 +5,6 @@ CONFIG_PATH="${1:-configs/final_study.yaml}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
-EXTRA_ARGS=("$@")
 RUN_STAMP="${RUN_STAMP:-$(date +%Y-%m-%d_%H-%M-%S)}"
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
@@ -42,7 +41,14 @@ if [[ "${ARCHIVE_EXISTING:-0}" == "1" ]]; then
   fi
 fi
 
+OUTPUT_PATH="$(pwd)/output/experiments/$EXPERIMENT_NAME"
+
 echo "Running final experiment matrix"
 echo "  config: $CONFIG_PATH"
 echo "  experiment: $EXPERIMENT_NAME"
-"$PYTHON" run_experiments.py --config "$CONFIG_PATH" --experiment-name "$EXPERIMENT_NAME" "${EXTRA_ARGS[@]}"
+echo "  output: $OUTPUT_PATH"
+if [[ $# -gt 0 ]]; then
+  "$PYTHON" run_experiments.py --config "$CONFIG_PATH" "$@" --experiment-name "$EXPERIMENT_NAME"
+else
+  "$PYTHON" run_experiments.py --config "$CONFIG_PATH" --experiment-name "$EXPERIMENT_NAME"
+fi
