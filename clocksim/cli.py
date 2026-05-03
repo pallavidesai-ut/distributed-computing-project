@@ -65,7 +65,6 @@ def main() -> None:
         client_count=args.client_count,
         replication_factor=args.replication_factor,
         sample_interval=args.sample_interval,
-        lease_duration=args.lease_duration,
         client_think_time=args.client_think_time,
         merge_probability=args.merge_probability,
         burst_interval=args.burst_interval,

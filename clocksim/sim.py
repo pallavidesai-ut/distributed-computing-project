@@ -498,7 +498,6 @@ def run_scenario(
     client_count: int,
     replication_factor: int,
     sample_interval: float,
-    lease_duration: float = 60.0,
     client_think_time: float = 4.0,
     merge_probability: float = 0.35,
     burst_interval: float = 18.0,

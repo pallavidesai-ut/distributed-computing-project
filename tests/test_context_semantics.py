@@ -30,6 +30,14 @@ def test_compact_context_promotes_contiguous_dots_into_prefix() -> None:
     assert ctx.dots == {Dot("a", 5)}
 
 
+def test_compact_context_does_not_emit_zero_prefix_for_non_contiguous_dot() -> None:
+    ctx = compact_context({}, {Dot("a", 2)})
+
+    assert ctx.prefix == {}
+    assert ctx.dots == {Dot("a", 2)}
+    assert ctx.actor_entries() == {"a"}
+
+
 def test_union_contexts_merges_prefixes_and_exceptions() -> None:
     left = CausalContext(prefix={"a": 2}, dots={Dot("b", 2)})
     right = CausalContext(prefix={"a": 1, "b": 1}, dots={Dot("b", 3)})

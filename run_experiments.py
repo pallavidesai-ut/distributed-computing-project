@@ -14,7 +14,7 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
 import matplotlib.pyplot as plt
 
 from analyze_run import analyze_run
-from code import CLOCK_FACTORIES, make_clock_factory, run_scenario, save_run
+from clocksim import CLOCK_FACTORIES, make_clock_factory, run_scenario, save_run
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -620,7 +620,6 @@ def main() -> None:
                         client_count=args.client_count,
                         replication_factor=args.replication_factor,
                         sample_interval=args.sample_interval,
-                        lease_duration=lease_duration,
                         client_think_time=args.client_think_time,
                         merge_probability=args.merge_probability,
                         burst_interval=args.burst_interval,

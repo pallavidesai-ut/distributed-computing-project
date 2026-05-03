@@ -83,7 +83,10 @@ def compact_context(prefix: dict[str, int], dots: set[Dot]) -> CausalContext:
         while cursor + 1 in counters:
             cursor += 1
             counters.remove(cursor)
-        merged_prefix[actor] = cursor
+        if cursor > 0:
+            merged_prefix[actor] = cursor
+        else:
+            merged_prefix.pop(actor, None)
         for counter in counters:
             compacted_dots.add(Dot(actor, counter))
 

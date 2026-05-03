@@ -240,7 +240,8 @@ def analyze_decision_quality(
         missed_conflicts = [
             row
             for row in concurrent_pairs
-            if row["final_action"] in {"drop_existing", "drop_incoming"}
+            if row["clock_relation"] in {"dominates", "dominated", "equal"}
+            and row["final_action"] in {"drop_existing", "drop_incoming"}
         ]
         stale_siblings = [
             row for row in descendant_pairs if row["final_action"] == "keep_both"
@@ -277,7 +278,10 @@ def analyze_decision_quality(
         row for row in decisions if row["true_relation"] in {"dominates", "dominated"}
     ]
     missed_conflicts = [
-        row for row in concurrent_pairs if row["final_action"] in {"drop_existing", "drop_incoming"}
+        row
+        for row in concurrent_pairs
+        if row["clock_relation"] in {"dominates", "dominated", "equal"}
+        and row["final_action"] in {"drop_existing", "drop_incoming"}
     ]
     stale_siblings = [
         row for row in descendant_pairs if row["final_action"] == "keep_both"

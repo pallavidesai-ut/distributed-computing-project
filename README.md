@@ -5,7 +5,7 @@ Per-object causality simulator for comparing `VV`, `DVV`, and `lease-DVV` under 
 ## Entry Points
 
 - `python run_experiments.py`
-- `python code.py`
+- `python simulate.py`
 - `python analyze_run.py`
 
 ## Full Study Pipeline
@@ -13,7 +13,7 @@ Per-object causality simulator for comparing `VV`, `DVV`, and `lease-DVV` under 
 Run a single simulation:
 
 ```bash
-python code.py --clock lease_dvv --profile sustained --run-name lease_sustained
+python simulate.py --clock lease_dvv --profile sustained --run-name lease_sustained
 ```
 
 Analyze one saved run:

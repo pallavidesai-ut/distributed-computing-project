@@ -69,3 +69,22 @@ def test_expired_lease_dvv_prunes_metadata_and_loses_recall_shape() -> None:
     represented = pruned_stamp.represented_context().materialize()
     truth = exact_stamp.represented_context().materialize()
     assert represented < truth
+
+
+def test_shorter_lease_prunes_at_least_as_much_as_longer_lease() -> None:
+    read_context = CausalContext(prefix={"n2": 4, "n3": 3}, dots={Dot("n4", 2)})
+
+    short_model = LeaseDottedVersionVectorModel(lease_duration=5.0)
+    short_state = short_model.make_state("n1")
+    short_state.leases["k0"].update({"n2": 11.0, "n3": 30.0, "n4": 30.0})
+    short_stamp = short_model.issue_stamp(short_state, "k0", read_context, now=20.0, actor_id="client-a")
+
+    long_model = LeaseDottedVersionVectorModel(lease_duration=30.0)
+    long_state = long_model.make_state("n1")
+    long_state.leases["k0"].update({"n2": 30.0, "n3": 30.0, "n4": 30.0})
+    long_stamp = long_model.issue_stamp(long_state, "k0", read_context, now=20.0, actor_id="client-a")
+
+    assert short_stamp.pruned_event_count() >= long_stamp.pruned_event_count()
+    assert short_stamp.metadata_component_count() <= long_stamp.metadata_component_count()
+    assert not short_stamp.represented_context().contains(Dot("n2", 4))
+    assert long_stamp.represented_context().contains(Dot("n2", 4))

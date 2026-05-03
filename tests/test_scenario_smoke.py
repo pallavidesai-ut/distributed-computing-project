@@ -22,7 +22,6 @@ def tiny_scenario(clock: str, *, lease_duration: float = 60.0):
         client_count=16,
         replication_factor=3,
         sample_interval=10.0,
-        lease_duration=lease_duration,
         client_think_time=0.1,
         merge_probability=0.7,
         burst_interval=12.0,

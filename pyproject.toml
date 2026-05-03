@@ -28,10 +28,10 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [project.scripts]
-simulate-churn = "code:main"
+simulate-churn = "clocksim.cli:main"
 analyze-churn-run = "analyze_run:main"
 run-churn-experiments = "run_experiments:main"
 
 [tool.setuptools]
-py-modules = ["code", "analyze_run", "run_experiments"]
+py-modules = ["simulate", "analyze_run", "run_experiments"]
 packages = ["clocksim"]

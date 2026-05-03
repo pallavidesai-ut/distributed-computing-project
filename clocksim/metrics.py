@@ -237,7 +237,8 @@ class MetricsCollector:
         missed_conflicts = [
             row
             for row in conflict_pairs
-            if row["final_action"] in {"drop_existing", "drop_incoming"}
+            if row["clock_relation"] in {"dominates", "dominated", "equal"}
+            and row["final_action"] in {"drop_existing", "drop_incoming"}
         ]
         descendant_pairs = [
             row for row in self.decisions if row["true_relation"] in {"dominates", "dominated"}
