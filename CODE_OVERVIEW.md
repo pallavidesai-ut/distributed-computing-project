@@ -20,11 +20,33 @@ This lets the analysis measure metadata cost and semantic fidelity separately.
 
 ---
 
-## Components
+## Package layout
 
-### 1. Entry point (`code.py`)
+The simulator implementation lives in the `clocksim/` package:
 
-`code.py` is a compatibility wrapper around `clocksim.py`. It re-exports the main simulator APIs and calls `main()` when run directly.
+```text
+clocksim/
+  __init__.py   # public compatibility exports
+  context.py    # Dot, EventId, CausalContext, context comparison helpers
+  clocks.py     # VV/DVV/lease-DVV stamps and clock models
+  store.py      # VersionRecord, Message, Node apply/merge behavior
+  metrics.py    # MetricsCollector and summary helpers
+  sim.py        # Environment, WorkloadConfig, Cluster, run_scenario, save_run
+  cli.py        # argument parser and main()
+
+code.py         # backwards-compatible script wrapper
+run_experiments.py
+analyze_run.py
+```
+
+Public APIs are re-exported from `clocksim.__init__` and remain available through `code.py`:
+
+- `run_scenario`
+- `save_run`
+- `make_clock_factory`
+- `CLOCK_FACTORIES`
+- `CHURN_PROFILES`
+- `main`
 
 Main commands:
 
@@ -36,18 +58,28 @@ python analyze_run.py --input-dir output/runs --run-name some_run
 
 ---
 
-### 2. Simulation engine (`Environment`)
+## Components
+
+### 1. Entry point (`code.py`, `clocksim/cli.py`)
+
+`code.py` is a compatibility wrapper around the `clocksim` package. It re-exports the main simulator APIs and calls `main()` when run directly.
+
+`clocksim/cli.py` contains parser setup and the CLI `main()` implementation.
+
+---
+
+### 2. Simulation engine (`clocksim/sim.py`)
 
 `Environment` is a lightweight discrete-event scheduler built on a heap queue.
 
 - `env.schedule(delay, callback)` schedules future work.
 - `env.run(until=T)` processes callbacks up to simulation time `T`.
 
-It drives background writes, churn, contention bursts, replication delivery, and snapshots.
+`Cluster` uses the environment to drive background writes, churn, contention bursts, replication delivery, and snapshots.
 
 ---
 
-### 3. Causal context model
+### 3. Causal context model (`clocksim/context.py`)
 
 Core causal data structures:
 
@@ -66,7 +98,7 @@ The `EventId` distinction matters because replica clocks use per-object counters
 
 ---
 
-### 4. Clock stamps
+### 4. Clock stamps (`clocksim/clocks.py`)
 
 Clock metadata is represented by stamp objects:
 
@@ -83,7 +115,7 @@ Each stamp can:
 
 ---
 
-### 5. Clock models
+### 5. Clock models (`clocksim/clocks.py`)
 
 Clock implementations are exposed through `ClockModel`:
 
@@ -106,7 +138,7 @@ Clock models implement:
 
 ---
 
-### 6. Node / object store
+### 6. Node / object store (`clocksim/store.py`)
 
 `Node` represents a replica. Each node stores per-key sibling sets:
 
@@ -125,7 +157,7 @@ This is where clock comparison affects conflict behavior.
 
 ---
 
-### 7. Cluster and workload
+### 7. Cluster and workload (`clocksim/sim.py`)
 
 `Cluster` manages active nodes, churn, clients, writes, replication, and snapshots.
 
@@ -150,7 +182,7 @@ Workload features:
 
 ---
 
-### 8. Metrics (`MetricsCollector`)
+### 8. Metrics (`clocksim/metrics.py`)
 
 The simulator records:
 
@@ -207,7 +239,7 @@ They do **not** model CPU cost, storage compaction cost, or realistic background
 
 ## Testing
 
-The project now has a pytest suite covering the key per-object semantics:
+The pytest suite covers the key per-object semantics:
 
 - causal context algebra
 - stamp represented histories
@@ -230,10 +262,14 @@ uv run pytest -q
 
 ## Current status
 
-The simulator is functional and produces report-oriented experiment outputs under:
+The simulator is functional, packaged as `clocksim/`, and produces report-oriented experiment outputs under:
 
 ```text
 output/experiments/per_object_clock_study/
 ```
 
-The core implementation is currently concentrated in `clocksim.py`. A future cleanup should split it into smaller modules for context logic, stamps, clocks, replica/object-store behavior, metrics, scenario execution, and I/O.
+The latest full post-refactor validation run was written to:
+
+```text
+output/experiments/per_object_clock_study_refactor/
+```
