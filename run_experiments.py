@@ -13,6 +13,8 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
 
 import matplotlib.pyplot as plt
 
+WRITE_PDF = False
+
 from analyze_run import analyze_run
 from clocksim import (
     CLOCK_FACTORIES,
@@ -48,7 +50,7 @@ def load_csv(path: Path) -> list[dict[str, str]]:
 
 def save_report_figure(fig: plt.Figure, output_path: Path) -> None:
     fig.savefig(output_path, dpi=180)
-    if output_path.suffix.lower() != ".pdf":
+    if WRITE_PDF and output_path.suffix.lower() != ".pdf":
         fig.savefig(output_path.with_suffix(".pdf"))
 
 
@@ -479,6 +481,98 @@ def make_same_replica_concurrency_example(output_dir: Path) -> None:
     plt.close(fig)
 
 
+def make_headline_table(rows: list[dict[str, object]], output_dir: Path) -> None:
+    by_profile_clock = {(str(row["profile"]), str(row["clock"])): row for row in rows}
+    table: list[dict[str, object]] = []
+    for profile in sorted({str(row["profile"]) for row in rows}):
+        vv = by_profile_clock.get((profile, "vv"))
+        dvv = by_profile_clock.get((profile, "dvv"))
+        lease_l16 = by_profile_clock.get((profile, "lease_dvv_L16"))
+        if vv is None or dvv is None:
+            continue
+        vv_bytes = float(vv.get("metadata.avg_metadata_bytes", 0.0))
+        dvv_bytes = float(dvv.get("metadata.avg_metadata_bytes", 0.0))
+        reduction = ((vv_bytes - dvv_bytes) / vv_bytes * 100.0) if vv_bytes else 0.0
+        table.append(
+            {
+                "profile": profile,
+                "vv_bytes_mean": round(vv_bytes, 4),
+                "vv_bytes_stderr": vv.get("metadata.avg_metadata_bytes.stderr", 0.0),
+                "dvv_bytes_mean": round(dvv_bytes, 4),
+                "dvv_bytes_stderr": dvv.get("metadata.avg_metadata_bytes.stderr", 0.0),
+                "dvv_reduction_vs_vv_pct": round(reduction, 3),
+                "vv_recall": vv.get("accuracy.avg_recall", 0.0),
+                "dvv_recall": dvv.get("accuracy.avg_recall", 0.0),
+                "lease_l16_bytes_mean": lease_l16.get("metadata.avg_metadata_bytes", "") if lease_l16 else "",
+                "lease_l16_bytes_stderr": lease_l16.get("metadata.avg_metadata_bytes.stderr", "") if lease_l16 else "",
+                "lease_l16_recall": lease_l16.get("accuracy.avg_recall", "") if lease_l16 else "",
+            }
+        )
+    write_csv(output_dir / "headline_results.csv", table)
+
+
+def make_failure_mode_outputs(rows: list[dict[str, object]], output_dir: Path) -> None:
+    table: list[dict[str, object]] = []
+    for row in rows:
+        table.append(
+            {
+                "profile": row["profile"],
+                "clock": row["clock"],
+                "avg_precision": row.get("accuracy.avg_precision", 0.0),
+                "avg_recall": row.get("accuracy.avg_recall", 0.0),
+                "avg_false_positive_events": row.get("accuracy.avg_false_positive_events", 0.0),
+                "avg_false_negative_events": row.get("accuracy.avg_false_negative_events", 0.0),
+                "missed_conflict_rate": row.get("decision_quality.missed_conflict_rate", 0.0),
+                "stale_sibling_rate": row.get("decision_quality.stale_sibling_rate", 0.0),
+            }
+        )
+    write_csv(output_dir / "failure_modes_by_clock.csv", table)
+
+    clocks = sorted({str(row["clock"]) for row in rows})
+    false_positive = [mean([float(row.get("accuracy.avg_false_positive_events", 0.0)) for row in rows if str(row["clock"]) == clock]) for clock in clocks]
+    false_negative = [mean([float(row.get("accuracy.avg_false_negative_events", 0.0)) for row in rows if str(row["clock"]) == clock]) for clock in clocks]
+    x_positions = list(range(len(clocks)))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar([x - width / 2 for x in x_positions], false_positive, width=width, label="False positives")
+    ax.bar([x + width / 2 for x in x_positions], false_negative, width=width, label="False negatives")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(clocks, rotation=20, ha="right")
+    ax.set_ylabel("Average events per version")
+    ax.set_title("Clock Failure Modes: Invented vs Forgotten Ancestry")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    save_report_figure(fig, output_dir / "false_positive_negative_by_clock.png")
+    plt.close(fig)
+
+
+def make_pareto_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    markers = {"stable": "o", "low": "s", "sustained": "^", "burst": "D"}
+    plotted_labels: set[str] = set()
+    for row in rows:
+        clock = str(row["clock"])
+        profile = str(row["profile"])
+        label = clock if clock not in plotted_labels else "_nolegend_"
+        ax.scatter(
+            float(row.get("metadata.avg_metadata_bytes", 0.0)),
+            float(row.get("accuracy.avg_recall", 0.0)),
+            marker=markers.get(profile, "o"),
+            s=55,
+            label=label,
+        )
+        plotted_labels.add(clock)
+    ax.set_xlabel("Average metadata bytes")
+    ax.set_ylabel("Average history recall")
+    ax.set_title("Metadata/Recall Pareto View")
+    ax.grid(alpha=0.25)
+    ax.legend(ncol=2)
+    fig.tight_layout()
+    save_report_figure(fig, output_dir / "metadata_recall_pareto.png")
+    plt.close(fig)
+
+
 def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> None:
     specs = [
         ("metadata.avg_metadata_bytes", "Avg metadata bytes", "Metadata Cost by Churn Profile", "metadata_bytes_vs_profile.png"),
@@ -501,6 +595,9 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
     make_tradeoff_plot(rows, output_dir)
     make_lease_ablation_plots(rows, output_dir)
     make_same_replica_concurrency_example(output_dir)
+    make_headline_table(rows, output_dir)
+    make_failure_mode_outputs(rows, output_dir)
+    make_pareto_plot(rows, output_dir)
 
 
 def clock_track(clock: str) -> str:
@@ -641,13 +738,16 @@ def build_parser() -> configargparse.ArgParser:
     parser.add("--lease-duration", type=float, default=16.0)
     parser.add("--lease-durations", nargs="+", type=float, default=None)
     parser.add("--analysis-window", type=float, default=12.0)
+    parser.add("--write-pdf", action="store_true", help="Also write PDF copies of generated report plots.")
     parser.add("--output-dir", default="output/experiments")
     parser.add("--experiment-name", default="per_object_clock_study")
     return parser
 
 
 def main() -> None:
+    global WRITE_PDF
     args = build_parser().parse_args()
+    WRITE_PDF = args.write_pdf
     lease_durations = args.lease_durations or [args.lease_duration]
     experiment_dir = Path(args.output_dir) / args.experiment_name
     experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -678,6 +778,7 @@ def main() -> None:
         "lease_duration": lease_durations[0],
         "lease_durations": lease_durations,
         "analysis_window": args.analysis_window,
+        "write_pdf": args.write_pdf,
         "output_dir": args.output_dir,
         "experiment_name": args.experiment_name,
     }

@@ -19,6 +19,8 @@ AGGREGATE_CSVS = {
     "lease_duration_ablation.csv",
     "metadata_reduction_vs_recall_loss.csv",
     "same_replica_concurrency_example.csv",
+    "headline_results.csv",
+    "failure_modes_by_clock.csv",
 }
 
 ROOT_DOCS = {

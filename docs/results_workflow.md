@@ -40,7 +40,7 @@ output/experiments/<timestamp>_<experiment_name>/
       *_summary.json
 ```
 
-Use `aggregate/`, `figures/`, and `time_series/` for paper-level results. Use `runs/` when inspecting an individual profile/clock/seed run. Aggregate bar/line plots include standard-error bars across seeds when multiple seeds are present.
+Use `aggregate/`, `figures/`, and `time_series/` for paper-level results. Use `runs/` when inspecting an individual profile/clock/seed run. Aggregate bar/line plots include standard-error bars across seeds when multiple seeds are present. PNG plots are always generated; pass `--write-pdf` to `scripts/reproduce_final.sh` or `run_experiments.py` to also emit PDF copies for LaTeX.
 
 ## Timestamped runs
 

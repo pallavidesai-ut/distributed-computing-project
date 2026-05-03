@@ -34,6 +34,7 @@ Use a custom config or override parameters:
 ```bash
 scripts/reproduce_final.sh configs/final_study.yaml
 scripts/reproduce_final.sh configs/final_study.yaml --seeds 1 --sim-time 60
+scripts/reproduce_final.sh configs/final_study.yaml --write-pdf
 ```
 
 The script writes organized results under `output/experiments/<timestamp>_per_object_clock_study_final/`.
