@@ -18,6 +18,15 @@ dependencies = [
   "PyYAML>=6,<7",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [project.scripts]
 simulate-churn = "code:main"
 analyze-churn-run = "analyze_run:main"

@@ -78,6 +78,25 @@ class Dot:
         return [self.actor, self.counter]
 
 
+@dataclass(frozen=True, order=True)
+class EventId:
+    """Object-scoped identity for a simulated write event.
+
+    Clock metadata intentionally remains a plain actor/counter dot. Ground-truth
+    history needs the object key too because this simulator uses per-object
+    counters for replica-actor clocks, so n1:1 on k0 and n1:1 on k1 are distinct
+    events.
+    """
+
+    key: str
+    actor: str
+    counter: int
+
+    @classmethod
+    def from_dot(cls, key: str, dot: Dot) -> "EventId":
+        return cls(key=key, actor=dot.actor, counter=dot.counter)
+
+
 def max_counter_for_actor(dots: Iterable[Dot], actor: str) -> int:
     return max((dot.counter for dot in dots if dot.actor == actor), default=0)
 
@@ -495,7 +514,7 @@ class VersionRecord:
     created_at: float
     phase: str
     read_size: int
-    true_history: set[Dot]
+    true_history: set[EventId]
 
     @property
     def dot(self) -> Dot:
@@ -958,7 +977,10 @@ class Cluster:
         return f"{key}:{dot.actor}:{dot.counter}:v{self.version_counter}"
 
     def _record_accuracy(self, version: VersionRecord) -> None:
-        represented = version.stamp.represented_context().materialize()
+        represented = {
+            EventId.from_dot(version.key, dot)
+            for dot in version.stamp.represented_context().materialize()
+        }
         truth = set(version.true_history)
         true_positive = len(represented & truth)
         false_positive = len(represented - truth)
@@ -992,7 +1014,7 @@ class Cluster:
             self.env.now,
             actor_id,
         )
-        true_history: set[Dot] = {stamp.dot}
+        true_history: set[EventId] = {EventId.from_dot(key, stamp.dot)}
         for version in context_versions:
             true_history.update(version.true_history)
         version = VersionRecord(
