@@ -1,0 +1,32 @@
+# Extreme scenario: hot-key contention plus sustained churn.
+# Purpose: amplify metadata growth, lease pruning, and stale-sibling pressure.
+# Justification: this represents a highly contended object in an elastic deployment where many clients write the same key while replicas churn.
+
+clocks: [vv, dvv, lease_dvv, vv_vnode]
+profiles: [sustained, burst]
+seeds: [1, 2, 3]
+
+sim-time: 240.0
+initial-size: 12
+write-interval: 3.0
+client-think-time: 2.0
+merge-probability: 0.45
+burst-interval: 12.0
+burst-writers: 8
+burst-spread: 1.0
+merge-delay: 8.0
+same-coordinator-probability: 0.65
+max-nodes: 36
+min-nodes: 4
+min-lat: 1.0
+max-lat: 7.0
+key-count: 8
+hot-key-probability: 0.85
+client-count: 512
+replication-factor: 4
+sample-interval: 10.0
+lease-duration: 16.0
+lease-durations: [4.0, 8.0, 16.0, 32.0]
+analysis-window: 12.0
+output-dir: output/experiments
+experiment-name: extreme_hotspot_churn

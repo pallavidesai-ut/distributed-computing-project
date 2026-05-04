@@ -1,0 +1,45 @@
+# Focused comparison for membership-aware lease-DVV.
+# Purpose: compare fixed time-based pruning with membership-aware pruning that only
+# expires departed replica actors after a lease grace period.
+
+clocks:
+  - dvv
+  - lease_dvv
+  - membership_lease_dvv
+profiles:
+  - stable
+  - low
+  - sustained
+  - burst
+seeds:
+  - 1
+  - 2
+  - 3
+
+sim-time: 240.0
+initial-size: 10
+write-interval: 5.0
+client-think-time: 4.0
+merge-probability: 0.35
+burst-interval: 18.0
+burst-writers: 4
+burst-spread: 2.0
+merge-delay: 10.0
+same-coordinator-probability: 0.75
+max-nodes: 28
+min-nodes: 4
+min-lat: 1.0
+max-lat: 5.0
+key-count: 12
+hot-key-probability: 0.65
+client-count: 128
+replication-factor: 4
+sample-interval: 10.0
+lease-duration: 16.0
+lease-durations:
+  - 8.0
+  - 16.0
+  - 32.0
+analysis-window: 12.0
+output-dir: output/experiments
+experiment-name: membership_lease_study

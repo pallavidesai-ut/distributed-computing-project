@@ -18,6 +18,7 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pi/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
@@ -25,3 +26,5 @@ dist/
 # Python / UV
 uv.lock
 *.csv
+out*
+output/

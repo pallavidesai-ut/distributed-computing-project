@@ -12,5 +12,26 @@ authors = [
   { name = "Pallavi Desai" },
   { name = "Eric Nelson" },
 ]
-dependencies = []
+dependencies = [
+  "configargparse>=1.7,<2",
+  "matplotlib>=3.8,<4",
+  "PyYAML>=6,<7",
+]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[project.scripts]
+simulate-churn = "clocksim.cli:main"
+analyze-churn-run = "analyze_run:main"
+run-churn-experiments = "run_experiments:main"
+
+[tool.setuptools]
+py-modules = ["simulate", "analyze_run", "run_experiments"]
+packages = ["clocksim"]

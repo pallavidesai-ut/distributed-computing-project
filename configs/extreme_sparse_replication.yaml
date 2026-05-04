@@ -1,0 +1,32 @@
+# Extreme scenario: sparse replication and many clients.
+# Purpose: amplify divergence across replicas and highlight conflict-resolution differences.
+# Justification: low replication factor with many clients stresses partial visibility; exact clocks should remain correct, while coarse vnode VV and short leases should show clearer operational costs.
+
+clocks: [vv, dvv, lease_dvv, vv_vnode]
+profiles: [low, sustained]
+seeds: [1, 2, 3]
+
+sim-time: 240.0
+initial-size: 10
+write-interval: 3.5
+client-think-time: 2.0
+merge-probability: 0.25
+burst-interval: 14.0
+burst-writers: 6
+burst-spread: 1.5
+merge-delay: 12.0
+same-coordinator-probability: 0.5
+max-nodes: 30
+min-nodes: 4
+min-lat: 1.0
+max-lat: 8.0
+key-count: 16
+hot-key-probability: 0.75
+client-count: 512
+replication-factor: 2
+sample-interval: 10.0
+lease-duration: 16.0
+lease-durations: [4.0, 8.0, 16.0, 32.0]
+analysis-window: 12.0
+output-dir: output/experiments
+experiment-name: extreme_sparse_replication

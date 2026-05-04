@@ -29,6 +29,70 @@ Our contributions will come in three parts:
 
 We expect to demonstrate that while DVV handles high concurrency better than traditional vector clocks, our lease extension significantly reduces the metadata footprint during high-churn periods. The final deliverable will be a validated proof-of-concept and a reusable SimPy framework for testing consistency protocols.
 
+**March 31 Pivot: Revised Thesis and Minimal Refactor Plan**
+
+**Revised Thesis**
+We are shifting the project from a node-global causal-broadcast simulator to a replicated key-value versioning simulator with per-object clocks. The correct baseline is a Version Vector (VV), not a classic Vector Clock (VC). Our core claim is now:
+
+In a churn-heavy, partially replicated key-value store, adaptive lease-pruned Dotted Version Vectors can reduce causal metadata overhead relative to VV and plain DVV while preserving conflict detection accuracy and ancestry tracking on hot objects better than a fixed-lease policy.
+
+This better matches how DVVs are used in practice. A realistic analogy is an edge-heavy retail or field-service deployment where stores, handheld devices, trucks, or local gateways act as replicas, objects are updated concurrently while replicas disconnect and rejoin, and the system must preserve enough causal ancestry to merge siblings without carrying unbounded metadata forever.
+
+**Revised System Model**
+
+- Replicas store per-key sibling sets rather than a single node-global clock.
+- Clients issue read-then-write operations and carry per-object causal context from reads into writes.
+- Each object version stores version metadata:
+  - `VV`: per-object version vector
+  - `DVV`: summary vector plus one distinguished dot
+  - `lease-DVV`: DVV plus expiring ancestry entries
+- Replicas propagate accepted versions to peers with network delay and churn.
+- The workload should include concurrent updates to the same hot key and later merge writes so DVV has a meaningful advantage over VV.
+
+**Central Research Question**
+
+- Under replica churn and concurrent per-object updates, how much metadata can adaptive lease-DVV save compared with VV and DVV, and what ancestry-tracking errors or extra sibling retention does that introduce?
+
+**Minimal Refactor Plan**
+
+1. Replace the current node-global `VectorClock` baseline with a per-object `VersionVector` baseline.
+2. Stop treating causality as a single frontier attached to each node; make causality part of each stored object version.
+3. Update `VersionRecord` so each stored value carries object-level metadata that is compared against sibling versions of the same key.
+4. Make client operations explicit:
+   - `read(key)` returns current siblings plus object context
+   - `write(key, value, context)` creates a new version from the read context
+5. Change write generation so writes depend on prior read context rather than on a node-local `prepare_send()` clock tick.
+6. Rework sibling insertion semantics:
+   - descendants replace older versions they dominate
+   - concurrent versions remain as siblings
+   - equal or dominated versions are ignored
+7. Implement real per-object `DVV` semantics:
+   - a new write gets a fresh dot from the accepting replica
+   - the summary captures prior causal context for that object
+   - comparisons use DVV ancestry logic instead of flattening everything into a node-global frontier
+8. Propagate object versions between replicas rather than relying on the current causal-broadcast buffering model.
+9. Keep churn and network delay, but reinterpret them at the replica level:
+   - joins create new replicas
+   - leaves make replicas unavailable
+   - rejoining or new replicas can bootstrap from another replica
+10. Add a simple merge workload for one hot key:
+   - two clients read the same ancestor
+   - they write concurrently
+   - a later client reads both siblings and writes a merged descendant
+11. Add lease pruning only after plain DVV works correctly.
+12. Extend the metrics to focus on:
+   - metadata bytes per version and per replica
+   - sibling counts over time
+   - obsolete sibling retention
+   - ancestry-tracking errors under lease pruning
+   - stale metadata from departed replicas
+
+**Pragmatic Scope Control**
+
+- Do not add quorums, partitions, read repair, or multi-key transactions in the first refactor.
+- Keep the first version to a small number of keys, one hot key, simple read-then-write clients, replica churn, and delayed replication.
+- Use the existing simulation harness, random seeds, churn profiles, and metrics pipeline where possible, but change the semantic core from node-level causal broadcast to per-object version tracking.
+
 **References**
 
 1. Preguiça, N. M., Baquero, C., Almeida, P. S., Fonte, V., & Gonçalves, R. (2010). Dotted version vectors: Logical clocks for optimistic replication. CoRR, abs/1011.5808.  
