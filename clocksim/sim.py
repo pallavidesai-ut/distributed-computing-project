@@ -276,6 +276,7 @@ class Cluster:
         context_versions: list[VersionRecord],
         phase: str,
         actor_id: str,
+        request_start_time: float | None = None,
     ) -> None:
         update_active_actors = getattr(self.clock_model, "update_active_actors", None)
         if update_active_actors is not None:
@@ -326,6 +327,18 @@ class Cluster:
             is_hot_key=(key == "k0"),
             target_replicas=len(targets) + 1,
         )
+        if request_start_time is not None:
+            self.metrics.record_client_write_latency(
+                t=self.env.now,
+                version_id=version.version_id,
+                key=key,
+                actor_id=actor_id,
+                coordinator=coordinator.id,
+                start_time=request_start_time,
+                end_time=self.env.now,
+                target_replicas=len(targets) + 1,
+                phase=phase,
+            )
 
         for target in targets:
             message = Message(
@@ -365,6 +378,7 @@ class Cluster:
             if coordinator is not None:
                 key = self.choose_key()
                 client_id = self.allocate_write_actor()
+                request_start_time = self.env.now
                 target_node = coordinator
 
                 def commit() -> None:
@@ -387,6 +401,7 @@ class Cluster:
                         context_versions=read_versions,
                         phase=phase,
                         actor_id=client_id,
+                        request_start_time=request_start_time,
                     )
 
                 think = random.expovariate(1.0 / self.workload.client_think_time)
@@ -406,13 +421,18 @@ class Cluster:
                 writers = max(2, self.workload.burst_writers)
                 for _ in range(writers):
                     coordinator = anchor
+                    request_start_time = self.env.now
                     client_id = self.allocate_write_actor()
                     if random.random() > self.workload.same_coordinator_probability:
                         alternative = self.choose_node()
                         if alternative is not None:
                             coordinator = alternative
 
-                    def burst_write(target: Node = coordinator, writer_id: str = client_id) -> None:
+                    def burst_write(
+                        target: Node = coordinator,
+                        writer_id: str = client_id,
+                        request_started: float = request_start_time,
+                    ) -> None:
                         if not target.active:
                             target = self.choose_node()
                             if target is None:
@@ -423,6 +443,7 @@ class Cluster:
                             context_versions=self.context_for_client(writer_id, key, shared_context),
                             phase="burst",
                             actor_id=writer_id,
+                            request_start_time=request_started,
                         )
 
                     self.env.schedule(random.uniform(0.0, self.workload.burst_spread), burst_write)
@@ -432,12 +453,14 @@ class Cluster:
                     if target is None:
                         return
                     actor_id = self.allocate_write_actor()
+                    request_start_time = self.env.now
                     self.execute_write(
                         key=key,
                         coordinator=target,
                         context_versions=self.context_for_client(actor_id, key, target.read(key)),
                         phase="burst_merge",
                         actor_id=actor_id,
+                        request_start_time=request_start_time,
                     )
 
                 self.env.schedule(self.workload.merge_delay, merge_write)

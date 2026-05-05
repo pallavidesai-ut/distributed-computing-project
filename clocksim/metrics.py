@@ -80,6 +80,20 @@ class DeliveryMetric:
 
 
 @dataclass(frozen=True)
+class ClientLatencyMetric:
+    t: float
+    version_id: str
+    key: str
+    actor_id: str
+    coordinator: str
+    start_time: float
+    end_time: float
+    latency: float
+    target_replicas: int
+    phase: str
+
+
+@dataclass(frozen=True)
 class DecisionMetric:
     t: float
     node: str
@@ -117,6 +131,7 @@ class MetricsCollector:
     def __init__(self) -> None:
         self.writes: list[dict[str, Any]] = []
         self.deliveries: list[dict[str, Any]] = []
+        self.client_latencies: list[dict[str, Any]] = []
         self.decisions: list[dict[str, Any]] = []
         self.snapshots: list[dict[str, Any]] = []
         self.joins: list[dict[str, Any]] = []
@@ -218,6 +233,37 @@ class MetricsCollector:
             )
         )
 
+    def record_client_write_latency(
+        self,
+        *,
+        t: float,
+        version_id: str,
+        key: str,
+        actor_id: str,
+        coordinator: str,
+        start_time: float,
+        end_time: float,
+        target_replicas: int,
+        phase: str,
+    ) -> None:
+        latency = end_time - start_time
+        self.client_latencies.append(
+            asdict(
+                ClientLatencyMetric(
+                    t=round_float(t),
+                    version_id=version_id,
+                    key=key,
+                    actor_id=actor_id,
+                    coordinator=coordinator,
+                    start_time=round_float(start_time),
+                    end_time=round_float(end_time),
+                    latency=round_float(latency),
+                    target_replicas=target_replicas,
+                    phase=phase,
+                )
+            )
+        )
+
     def record_decision(
         self,
         *,
@@ -309,6 +355,7 @@ class MetricsCollector:
         for name, rows in [
             ("writes", self.writes),
             ("deliveries", self.deliveries),
+            ("client_latencies", self.client_latencies),
             ("decisions", self.decisions),
             ("snapshots", self.snapshots),
             ("joins", self.joins),
@@ -347,6 +394,7 @@ class MetricsCollector:
         hot_siblings = [float(row["avg_hot_key_siblings"]) for row in self.snapshots]
         versions_per_key = [float(row["avg_versions_per_key"]) for row in self.snapshots]
         latency = [float(row["latency"]) for row in self.deliveries]
+        client_latency = [float(row["latency"]) for row in self.client_latencies]
         pruned_writes = sum(int(row["was_pruned"]) for row in self.writes)
 
         conflict_pairs = [
@@ -412,6 +460,18 @@ class MetricsCollector:
             else 0.0,
             "avg_latency": round_float(sum(latency) / len(latency), 3) if latency else 0.0,
             "latency_p95": round_float(percentile(latency, 0.95), 3),
+            "median_latency": round_float(percentile(latency, 0.50), 3) if latency else 0.0,
+            "p99_latency": round_float(percentile(latency, 0.99), 3),
+            "max_latency": round_float(max(latency), 3) if latency else 0.0,
+            "avg_client_write_latency": round_float(sum(client_latency) / len(client_latency), 3)
+            if client_latency
+            else 0.0,
+            "median_client_write_latency": round_float(percentile(client_latency, 0.50), 3)
+            if client_latency
+            else 0.0,
+            "p95_client_write_latency": round_float(percentile(client_latency, 0.95), 3),
+            "p99_client_write_latency": round_float(percentile(client_latency, 0.99), 3),
+            "max_client_write_latency": round_float(max(client_latency), 3) if client_latency else 0.0,
             "pruned_write_rate": round_float(pruned_writes / len(self.writes), 4)
             if self.writes
             else 0.0,
