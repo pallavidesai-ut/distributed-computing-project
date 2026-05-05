@@ -18,9 +18,6 @@ WRITE_PDF = False
 from analyze_run import analyze_run
 from clocksim import (
     CLOCK_FACTORIES,
-    CausalContext,
-    DottedVersionVectorModel,
-    VnodeVersionVectorModel,
     make_clock_factory,
     run_scenario,
     save_run,
@@ -433,58 +430,6 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
         plt.close(fig)
 
 
-def make_same_replica_concurrency_example(output_dir: Path) -> None:
-    """Create a deterministic example showing why dots matter."""
-    vnode = VnodeVersionVectorModel()
-    vnode_state = vnode.make_state("n1")
-    vnode_first = vnode.issue_stamp(vnode_state, "k0", CausalContext(), now=0.0, actor_id="client-a")
-    vnode_second = vnode.issue_stamp(vnode_state, "k0", CausalContext(), now=1.0, actor_id="client-b")
-
-    dvv = DottedVersionVectorModel()
-    dvv_state = dvv.make_state("n1")
-    dvv_first = dvv.issue_stamp(dvv_state, "k0", CausalContext(), now=0.0, actor_id="client-a")
-    dvv_second = dvv.issue_stamp(dvv_state, "k0", CausalContext(), now=1.0, actor_id="client-b")
-
-    rows = [
-        {
-            "clock": "dvv",
-            "actor_granularity": "replica dot",
-            "write_1_dot": str(dvv_first.dot),
-            "write_2_dot": str(dvv_second.dot),
-            "clock_relation_write2_vs_write1": dvv.compare_stamps(dvv_second, dvv_first),
-            "interpretation": "correctly preserves concurrency between independent writes",
-        },
-        {
-            "clock": "vv_vnode",
-            "actor_granularity": "replica vector entry",
-            "write_1_dot": str(vnode_first.dot),
-            "write_2_dot": str(vnode_second.dot),
-            "clock_relation_write2_vs_write1": vnode.compare_stamps(vnode_second, vnode_first),
-            "interpretation": "falsely orders independent same-replica writes",
-        },
-    ]
-    write_csv(output_dir / "same_replica_concurrency_example.csv", rows)
-
-    fig, ax = plt.subplots(figsize=(10, 2.8))
-    ax.axis("off")
-    table = ax.table(
-        cellText=[
-            [row["clock"], row["actor_granularity"], row["clock_relation_write2_vs_write1"], row["interpretation"]]
-            for row in rows
-        ],
-        colLabels=["Clock", "Actor granularity", "Relation: write 2 vs write 1", "Interpretation"],
-        loc="center",
-        cellLoc="left",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1, 1.7)
-    ax.set_title("Same-replica independent writes: DVV preserves concurrency, vnode-VV over-orders")
-    fig.tight_layout()
-    save_report_figure(fig, output_dir / "same_replica_concurrency_example.png")
-    plt.close(fig)
-
-
 def make_headline_table(rows: list[dict[str, object]], output_dir: Path) -> None:
     by_profile_clock = {(str(row["profile"]), str(row["clock"])): row for row in rows}
     table: list[dict[str, object]] = []
@@ -598,7 +543,6 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
         )
     make_tradeoff_plot(rows, output_dir)
     make_lease_ablation_plots(rows, output_dir)
-    make_same_replica_concurrency_example(output_dir)
     make_headline_table(rows, output_dir)
     make_failure_mode_outputs(rows, output_dir)
     make_pareto_plot(rows, output_dir)
@@ -607,8 +551,6 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
 def clock_track(clock: str) -> str:
     if clock == "vv":
         return "Exact Baseline"
-    if clock == "vv_vnode":
-        return "Production Baseline"
     if clock == "dvv":
         return "DVV"
     if clock.startswith("lease_dvv"):
@@ -624,20 +566,19 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "",
         "## Scope",
         "",
-        "This experiment matrix compares two VV baselines, exact DVV, and lease-pruned DVV under the same churn-heavy workload.",
+        "This experiment matrix compares exact VV, exact DVV, and lease-pruned DVV under the same churn-heavy workload.",
         "",
         "The simulator now separates true causal history from clock-encoded history, which makes the comparison meaningful on three axes:",
         "",
         "- metadata cost per write and per stored version",
         "- conflict-handling accuracy on hot keys",
-        "- ancestry loss introduced by production-style vnode VV or lease pruning",
+        "- ancestry loss introduced by lease pruning",
         "",
         "## Clock Map",
         "",
         "| Clock | Encoded state | Main strength | Main failure mode under churn |",
         "| --- | --- | --- | --- |",
         "| VV | Exact per-object vector over bounded client actors | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct clients touching an object |",
-        "| Vnode-VV | Server/vnode version vector over replica actors | Production-similar baseline used in real KV stores before DVV | Can collapse causality under proxy actors and produce sibling pathologies |",
         "| DVV | Prefix summary plus explicit dots over replica actors | Full ancestry precision with metadata bounded by replication degree | More complex representation and implementation |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
         "",
@@ -654,7 +595,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         f"- Replication factor: {experiment_config['replication_factor']}",
         f"- Contention burst every {experiment_config['burst_interval']} time units with {experiment_config['burst_writers']} writers",
         "",
-        "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV uses a bounded client actor pool with carried per-key session context, vnode-VV uses production-style replica actors, and DVV/lease-DVV use replica dots. This yields both an exact baseline track and a coarse-actor production track in one experiment matrix.",
+        "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV uses a bounded client actor pool with carried per-key session context, and DVV/lease-DVV use replica dots. This keeps the main comparison on the same per-object causality semantics.",
         "",
         "## Aggregated Findings",
         "",
@@ -664,8 +605,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         [
             "### Track Structure",
             "",
-            "- Fairness track: compare `vv` vs `dvv` vs all `lease_dvv` variants.",
-            "- Production track: compare `vv_vnode` vs `dvv` vs all `lease_dvv` variants.",
+            "- Apples-to-apples track: compare `vv` vs `dvv` vs all `lease_dvv` variants.",
             "",
         ]
     )
@@ -693,7 +633,6 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
             "## Interpretation",
             "",
             "- `vv` is the exact vanilla baseline. It shows the metadata cost of preserving full object ancestry with bounded client actors.",
-            "- `vv_vnode` is the production realism baseline. It mirrors the server/vnode actor model used in practice before DVV, so any precision loss there is part of the production story, not a simulator bug.",
             "- `dvv` should match `vv` on correctness while reducing metadata by using replica-issued dots rather than tracking every client actor in the version vector.",
             "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
             "",

@@ -7,7 +7,6 @@ from clocksim import (
     LeaseDottedVersionVectorModel,
     MembershipLeaseDottedVersionVectorModel,
     VersionVectorModel,
-    VnodeVersionVectorModel,
 )
 
 
@@ -26,15 +25,6 @@ def test_vv_and_dvv_preserve_read_ancestry_in_same_object_chain() -> None:
         assert second.represented_context().contains(first.dot)
         assert model.compare_stamps(second, first) == "dominates"
 
-
-def test_vnode_vv_collapses_independent_same_coordinator_writes() -> None:
-    model = VnodeVersionVectorModel()
-    state = model.make_state("n1")
-
-    first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-a")
-    second = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-b")
-
-    assert model.compare_stamps(second, first) == "dominates"
 
 
 def test_long_lease_dvv_preserves_recent_observed_actor_history() -> None:
