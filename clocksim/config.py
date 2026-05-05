@@ -27,7 +27,9 @@ CHURN_PROFILES: dict[str, ChurnProfile] = {
 @dataclass(frozen=True)
 class WorkloadConfig:
     key_count: int = 12
+    key_distribution: str = "hotcold"
     hot_key_probability: float = 0.65
+    zipf_skew: float = 1.0
     client_count: int = 128
     write_interval: float = 5.0
     client_think_time: float = 4.0
@@ -57,6 +59,7 @@ class NetworkConfig:
 
 
 ACTOR_DOMAINS = ("physical", "slot", "client")
+KEY_DISTRIBUTIONS = ("hotcold", "zipf")
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,9 @@ SCENARIO_ARG_NAMES = (
     "min_lat",
     "max_lat",
     "key_count",
+    "key_distribution",
     "hot_key_probability",
+    "zipf_skew",
     "client_count",
     "replication_factor",
     "sample_interval",
@@ -125,7 +130,14 @@ def add_scenario_args(
     parser.add_argument("--min-lat", type=float, default=NetworkConfig.min_lat)
     parser.add_argument("--max-lat", type=float, default=NetworkConfig.max_lat)
     parser.add_argument("--key-count", type=int, default=WorkloadConfig.key_count)
+    parser.add_argument(
+        "--key-distribution",
+        choices=KEY_DISTRIBUTIONS,
+        default=WorkloadConfig.key_distribution,
+        help="Background key-access model: hotcold (Bernoulli hot key) or zipf.",
+    )
     parser.add_argument("--hot-key-probability", type=float, default=WorkloadConfig.hot_key_probability)
+    parser.add_argument("--zipf-skew", type=float, default=WorkloadConfig.zipf_skew)
     parser.add_argument("--client-count", type=int, default=WorkloadConfig.client_count)
     parser.add_argument("--replication-factor", type=int, default=ClusterConfig.replication_factor)
     parser.add_argument("--sample-interval", type=float, default=ClusterConfig.sample_interval)
@@ -165,6 +177,13 @@ def scenario_config_from_kwargs(**kwargs: Any) -> ScenarioConfig:
     actor_domain = str(kwargs.pop("actor_domain", ScenarioConfig.actor_domain))
     if actor_domain not in ACTOR_DOMAINS:
         raise ValueError(f"Unknown actor_domain {actor_domain!r}; expected one of {ACTOR_DOMAINS}")
+    key_distribution = str(
+        kwargs.pop("key_distribution", WorkloadConfig.key_distribution)
+    )
+    if key_distribution not in KEY_DISTRIBUTIONS:
+        raise ValueError(
+            f"Unknown key_distribution {key_distribution!r}; expected one of {KEY_DISTRIBUTIONS}"
+        )
     return ScenarioConfig(
         profile=profile,
         sim_time=sim_time,
@@ -179,6 +198,8 @@ def scenario_config_from_kwargs(**kwargs: Any) -> ScenarioConfig:
         ),
         workload=WorkloadConfig(
             key_count=int(kwargs.pop("key_count", WorkloadConfig.key_count)),
+            key_distribution=key_distribution,
+            zipf_skew=float(kwargs.pop("zipf_skew", WorkloadConfig.zipf_skew)),
             hot_key_probability=float(kwargs.pop("hot_key_probability", WorkloadConfig.hot_key_probability)),
             client_count=int(kwargs.pop("client_count", WorkloadConfig.client_count)),
             write_interval=float(kwargs.pop("write_interval", WorkloadConfig.write_interval)),
@@ -224,7 +245,9 @@ def scenario_config_to_dict(config: ScenarioConfig) -> dict[str, Any]:
         "min_lat": config.network.min_lat,
         "max_lat": config.network.max_lat,
         "key_count": config.workload.key_count,
+        "key_distribution": config.workload.key_distribution,
         "hot_key_probability": config.workload.hot_key_probability,
+        "zipf_skew": config.workload.zipf_skew,
         "client_count": config.workload.client_count,
         "replication_factor": config.cluster.replication_factor,
         "sample_interval": config.cluster.sample_interval,

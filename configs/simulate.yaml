@@ -1,5 +1,6 @@
 profile: sustained
 clock: dvv
+actor-domain: physical
 lease-duration: 16.0
 sim-time: 240.0
 seed: 42

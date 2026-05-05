@@ -598,7 +598,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         f"- Clocks: {', '.join(clocks)}",
         f"- Seeds: {experiment_config['seeds']}",
         f"- Lease-DVV durations: {experiment_config['lease_durations']}",
-        f"- Hot-key probability: {experiment_config['hot_key_probability']}",
+        f"- Key distribution: {experiment_config['key_distribution']} (hot-key p={experiment_config['hot_key_probability']}, zipf skew={experiment_config['zipf_skew']})",
         f"- Actor domain: {experiment_config['actor_domain']}",
         f"- Client actor pool: {experiment_config['client_count']}",
         f"- Replication factor: {experiment_config['replication_factor']}",

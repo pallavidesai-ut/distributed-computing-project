@@ -16,6 +16,7 @@ from __future__ import annotations
 import heapq
 import json
 import random
+import bisect
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
@@ -128,6 +129,7 @@ class Cluster:
         self.clock_actor_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
             lambda: defaultdict(list)
         )
+        self._zipf_cdf = self._build_zipf_cdf()
 
         for _ in range(config.cluster.initial_size):
             self._add_node()
@@ -167,9 +169,41 @@ class Cluster:
         return random.choice(active) if active else None
 
     def choose_key(self) -> str:
-        if self.workload.key_count <= 1 or random.random() < self.workload.hot_key_probability:
+        if self.workload.key_count <= 1:
+            return "k0"
+        if self.workload.key_distribution == "zipf":
+            return self._choose_key_zipf()
+        if random.random() < self.workload.hot_key_probability:
             return "k0"
         return f"k{random.randint(1, self.workload.key_count - 1)}"
+
+    def _build_zipf_cdf(self) -> list[float]:
+        if self.workload.key_distribution != "zipf":
+            return []
+        if self.workload.key_count <= 0:
+            return []
+        if self.workload.zipf_skew <= 0.0:
+            return []
+        weights = [1.0 / (float(rank) ** self.workload.zipf_skew) for rank in range(1, self.workload.key_count + 1)]
+        total = sum(weights)
+        if total <= 0.0:
+            return []
+        cumulative = []
+        current = 0.0
+        for weight in weights:
+            current += weight / total
+            cumulative.append(current)
+        cumulative[-1] = 1.0
+        return cumulative
+
+    def _choose_key_zipf(self) -> str:
+        if self.workload.key_distribution != "zipf":
+            raise RuntimeError("Zipf key distribution is disabled.")
+        cdf = self._zipf_cdf
+        if not cdf:
+            return f"k{random.randint(0, self.workload.key_count - 1)}"
+        rank = bisect.bisect_left(cdf, random.random())
+        return f"k{min(rank, self.workload.key_count - 1)}"
 
     def choose_client(self) -> str:
         return random.choice(self.clients)
@@ -583,6 +617,4 @@ def save_run(
     (output_dir / f"{run_name}_config.json").write_text(json.dumps(config, indent=2))
     (output_dir / f"{run_name}_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
-
-
 

@@ -8,6 +8,8 @@ profiles:
   - sustained
   - burst
 
+actor-domain: physical
+
 seeds:
   - 7
   - 17

@@ -18,6 +18,8 @@ profiles:
   - sustained
   - burst
 
+actor-domain: client
+
 seeds:
   - 1
   - 2

@@ -11,6 +11,8 @@ clocks:
 profiles:
   - stable
 
+actor-domain: client
+
 seeds:
   - 1
   - 2

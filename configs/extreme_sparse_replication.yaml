@@ -4,6 +4,8 @@
 
 clocks: [vv, dvv, lease_dvv]
 profiles: [low, sustained]
+actor-domain: physical
+
 seeds: [1, 2, 3]
 
 sim-time: 240.0

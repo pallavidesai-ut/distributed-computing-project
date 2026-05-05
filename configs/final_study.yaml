@@ -13,6 +13,8 @@ profiles:
   - burst
 
 # Five seeds is the minimum paper-ready sweep. Increase to 10 if runtime allows.
+actor-domain: physical
+
 seeds:
   - 1
   - 2

@@ -59,8 +59,9 @@ The true causal history is represented separately from the clock metadata. This 
 The workload combines three kinds of activity:
 
 1. **Background writes**
-   - Clients choose keys according to a hot-key distribution.
+   - Clients choose keys according to a configurable distribution (`hotcold` or `zipf`, default: `hotcold`).
    - Each write reads local versions from a coordinator, combines them with the client's carried session context, and writes a new version.
+   - `hotcold` uses `hot-key-probability`; `zipf` samples keys by decreasing Zipfian rank with exponent `zipf-skew`.
 
 2. **Contention bursts**
    - Multiple clients write concurrently to the hot key `k0` from a shared starting context.

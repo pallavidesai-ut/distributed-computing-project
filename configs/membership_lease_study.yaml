@@ -11,6 +11,8 @@ profiles:
   - low
   - sustained
   - burst
+actor-domain: physical
+
 seeds:
   - 1
   - 2
