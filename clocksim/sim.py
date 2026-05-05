@@ -69,6 +69,7 @@ class Environment:
 
 from .clocks import ClockModel
 from .context import Dot, EventId
+from .shared_metadata import sibling_set_encoding
 from .store import Message, Node, VersionRecord
 
 class Cluster:
@@ -527,6 +528,8 @@ class Cluster:
                     max_hot_key_siblings=0,
                     avg_metadata_bytes=0.0,
                     avg_actor_entries=0.0,
+                    avg_sibling_set_metadata_bytes=0.0,
+                    avg_sibling_set_metadata_components=0.0,
                     avg_stale_actor_fraction=0.0,
                 )
             else:
@@ -534,12 +537,17 @@ class Cluster:
                 hot_sibling_counts: list[int] = []
                 metadata_bytes: list[int] = []
                 actor_entries: list[int] = []
+                sibling_set_metadata_bytes: list[int] = []
+                sibling_set_metadata_components: list[int] = []
                 stale_actor_fractions: list[float] = []
                 for node in active:
                     key_versions = sum(len(versions) for versions in node.kv.values())
                     version_counts.append(key_versions / max(len(node.kv), 1) if node.kv else 0.0)
                     hot_sibling_counts.append(len(node.kv.get("k0", [])))
                     for versions in node.kv.values():
+                        encoding = sibling_set_encoding([version.stamp for version in versions])
+                        sibling_set_metadata_bytes.append(encoding.metadata_bytes())
+                        sibling_set_metadata_components.append(encoding.metadata_component_count())
                         for version in versions:
                             metadata_bytes.append(version.stamp.metadata_bytes())
                             actor_set = version.stamp.actor_entries()
@@ -557,6 +565,16 @@ class Cluster:
                     max_hot_key_siblings=max(hot_sibling_counts, default=0),
                     avg_metadata_bytes=sum(metadata_bytes) / len(metadata_bytes) if metadata_bytes else 0.0,
                     avg_actor_entries=sum(actor_entries) / len(actor_entries) if actor_entries else 0.0,
+                    avg_sibling_set_metadata_bytes=(
+                        sum(sibling_set_metadata_bytes) / len(sibling_set_metadata_bytes)
+                    )
+                    if sibling_set_metadata_bytes
+                    else 0.0,
+                    avg_sibling_set_metadata_components=(
+                        sum(sibling_set_metadata_components) / len(sibling_set_metadata_components)
+                    )
+                    if sibling_set_metadata_components
+                    else 0.0,
                     avg_stale_actor_fraction=sum(stale_actor_fractions) / len(stale_actor_fractions)
                     if stale_actor_fractions
                     else 0.0,
@@ -617,4 +635,3 @@ def save_run(
     (output_dir / f"{run_name}_config.json").write_text(json.dumps(config, indent=2))
     (output_dir / f"{run_name}_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
-

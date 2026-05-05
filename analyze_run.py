@@ -312,6 +312,12 @@ def analyze_replica_state(
                 "avg_hot_key_siblings": parse_float(row["avg_hot_key_siblings"]),
                 "max_hot_key_siblings": parse_int(row["max_hot_key_siblings"]),
                 "avg_metadata_bytes": parse_float(row["avg_metadata_bytes"]),
+                "avg_sibling_set_metadata_bytes": parse_float(
+                    row.get("avg_sibling_set_metadata_bytes", row["avg_metadata_bytes"])
+                ),
+                "avg_sibling_set_metadata_components": parse_float(
+                    row.get("avg_sibling_set_metadata_components", "0")
+                ),
                 "avg_stale_actor_fraction": parse_float(row["avg_stale_actor_fraction"]),
             }
         )
@@ -343,6 +349,29 @@ def analyze_replica_state(
         "avg_stale_actor_fraction": round(
             safe_mean([parse_float(row["avg_stale_actor_fraction"]) for row in snapshots]),
             4,
+        ),
+        "avg_sibling_set_metadata_bytes": round(
+            safe_mean(
+                [
+                    parse_float(
+                        row.get(
+                            "avg_sibling_set_metadata_bytes",
+                            row["avg_metadata_bytes"],
+                        )
+                    )
+                    for row in snapshots
+                ]
+            ),
+            3,
+        ),
+        "avg_sibling_set_metadata_components": round(
+            safe_mean(
+                [
+                    parse_float(row.get("avg_sibling_set_metadata_components", "0"))
+                    for row in snapshots
+                ]
+            ),
+            3,
         ),
     }
 

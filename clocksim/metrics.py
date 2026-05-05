@@ -101,6 +101,8 @@ class SnapshotMetric:
     max_hot_key_siblings: int
     avg_metadata_bytes: float
     avg_actor_entries: float
+    avg_sibling_set_metadata_bytes: float
+    avg_sibling_set_metadata_components: float
     avg_stale_actor_fraction: float
 
 
@@ -255,6 +257,8 @@ class MetricsCollector:
         max_hot_key_siblings: int,
         avg_metadata_bytes: float,
         avg_actor_entries: float,
+        avg_sibling_set_metadata_bytes: float,
+        avg_sibling_set_metadata_components: float,
         avg_stale_actor_fraction: float,
     ) -> None:
         self.snapshots.append(
@@ -267,6 +271,12 @@ class MetricsCollector:
                     max_hot_key_siblings=max_hot_key_siblings,
                     avg_metadata_bytes=round_float(avg_metadata_bytes),
                     avg_actor_entries=round_float(avg_actor_entries),
+                    avg_sibling_set_metadata_bytes=round_float(
+                        avg_sibling_set_metadata_bytes
+                    ),
+                    avg_sibling_set_metadata_components=round_float(
+                        avg_sibling_set_metadata_components
+                    ),
                     avg_stale_actor_fraction=round_float(avg_stale_actor_fraction),
                 )
             )
@@ -321,6 +331,19 @@ class MetricsCollector:
         stale_actor_fraction = [
             float(row["avg_stale_actor_fraction"]) for row in self.snapshots
         ]
+        sibling_set_metadata_bytes = [
+            float(
+                row.get(
+                    "avg_sibling_set_metadata_bytes",
+                    row.get("avg_metadata_bytes", 0.0),
+                )
+            )
+            for row in self.snapshots
+        ]
+        sibling_set_metadata_components = [
+            float(row.get("avg_sibling_set_metadata_components", 0.0))
+            for row in self.snapshots
+        ]
         hot_siblings = [float(row["avg_hot_key_siblings"]) for row in self.snapshots]
         versions_per_key = [float(row["avg_versions_per_key"]) for row in self.snapshots]
         latency = [float(row["latency"]) for row in self.deliveries]
@@ -355,6 +378,18 @@ class MetricsCollector:
             "p95_metadata_bytes": round_float(percentile(metadata_bytes, 0.95), 3),
             "avg_actor_entries": round_float(sum(actor_entries) / len(actor_entries), 3)
             if actor_entries
+            else 0.0,
+            "avg_sibling_set_metadata_bytes": round_float(
+                sum(sibling_set_metadata_bytes) / len(sibling_set_metadata_bytes),
+                3,
+            )
+            if sibling_set_metadata_bytes
+            else 0.0,
+            "avg_sibling_set_metadata_components": round_float(
+                sum(sibling_set_metadata_components) / len(sibling_set_metadata_components),
+                3,
+            )
+            if sibling_set_metadata_components
             else 0.0,
             "avg_history_precision": round_float(sum(precision) / len(precision), 4)
             if precision
