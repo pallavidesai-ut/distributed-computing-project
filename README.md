@@ -1,6 +1,6 @@
 # distributed-computing-project
 
-Per-object causality simulator for comparing `VV`, `DVV`, `lease-DVV`, and membership-aware lease-DVV under churn.
+Per-object causality simulator for comparing exact `VV`, `DVV`, `ITC` (Interval Tree Clock), `lease-DVV`, and membership-aware lease-DVV under churn.
 
 ## Entry Points
 
@@ -15,6 +15,7 @@ Run a single simulation:
 
 ```bash
 python simulate.py --clock lease_dvv --profile sustained --run-name lease_sustained
+python simulate.py --clock itc --profile sustained --run-name itc_sustained
 ```
 
 Analyze one saved run:
@@ -34,6 +35,7 @@ Use a custom config or override parameters:
 ```bash
 scripts/reproduce_final.sh configs/final_study.yaml
 scripts/reproduce_final.sh configs/final_study.yaml --seeds 1 --sim-time 60
+scripts/reproduce_final.sh configs/final_study.yaml --clocks vv dvv itc --seeds 1 --sim-time 60
 scripts/reproduce_final.sh configs/final_study.yaml --write-pdf
 ```
 

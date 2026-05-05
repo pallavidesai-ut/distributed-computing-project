@@ -553,6 +553,8 @@ def clock_track(clock: str) -> str:
         return "Exact Baseline"
     if clock == "dvv":
         return "DVV"
+    if clock == "itc":
+        return "Interval Tree Clock"
     if clock.startswith("lease_dvv"):
         return "Approximate DVV"
     return "Other"
@@ -566,7 +568,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "",
         "## Scope",
         "",
-        "This experiment matrix compares exact VV, exact DVV, and lease-pruned DVV under the same churn-heavy workload.",
+        "This experiment matrix compares exact VV, exact DVV, exact ITC when selected, and lease-pruned DVV under the same churn-heavy workload.",
         "",
         "The simulator now separates true causal history from clock-encoded history, which makes the comparison meaningful on three axes:",
         "",
@@ -580,9 +582,10 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "| --- | --- | --- | --- |",
         "| VV | Exact per-object vector over bounded client actors | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct clients touching an object |",
         "| DVV | Prefix summary plus explicit dots over replica actors | Full ancestry precision with metadata bounded by replication degree | More complex representation and implementation |",
+        "| ITC | Interval Tree Clock identity and event trees over dynamic client actors | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
         "",
-        "Related alternatives worth discussing in the paper, but not implemented here, are Interval Tree Clocks and Bounded Version Vectors for dynamic membership, plus HLC-style approximate causality if the study broadens beyond exact version ancestry.",
+        "Related alternatives worth discussing in the paper, but not implemented here, are Bounded Version Vectors and HLC-style approximate causality if the study broadens beyond exact version ancestry.",
         "",
         "## Benchmark Design",
         "",
@@ -605,7 +608,8 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         [
             "### Track Structure",
             "",
-            "- Apples-to-apples track: compare `vv` vs `dvv` vs all `lease_dvv` variants.",
+            "- Apples-to-apples exact track: compare `vv` vs `dvv` vs `itc` when selected.",
+            "- Approximate track: compare exact clocks against all `lease_dvv` variants.",
             "",
         ]
     )
@@ -634,6 +638,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
             "",
             "- `vv` is the exact vanilla baseline. It shows the metadata cost of preserving full object ancestry with bounded client actors.",
             "- `dvv` should match `vv` on correctness while reducing metadata by using replica-issued dots rather than tracking every client actor in the version vector.",
+            "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over dynamic client actors; compare its tree metadata against the exact VV and DVV baselines.",
             "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
             "",
             "## Outputs",
