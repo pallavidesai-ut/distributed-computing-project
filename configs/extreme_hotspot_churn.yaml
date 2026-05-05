@@ -2,7 +2,7 @@
 # Purpose: amplify metadata growth, lease pruning, and stale-sibling pressure.
 # Justification: this represents a highly contended object in an elastic deployment where many clients write the same key while replicas churn.
 
-clocks: [vv, dvv, lease_dvv, vv_vnode]
+clocks: [vv, dvv, lease_dvv]
 profiles: [sustained, burst]
 seeds: [1, 2, 3]
 

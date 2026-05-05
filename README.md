@@ -36,6 +36,7 @@ Use a custom config or override parameters:
 scripts/reproduce_final.sh configs/final_study.yaml
 scripts/reproduce_final.sh configs/final_study.yaml --seeds 1 --sim-time 60
 scripts/reproduce_final.sh configs/final_study.yaml --clocks vv dvv itc --seeds 1 --sim-time 60
+scripts/reproduce_final.sh configs/client_actor_clock_study.yaml  # apples-to-apples VV/DVV/ITC client-actor track
 scripts/reproduce_final.sh configs/final_study.yaml --write-pdf
 ```
 

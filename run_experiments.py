@@ -18,9 +18,13 @@ WRITE_PDF = False
 from analyze_run import analyze_run
 from clocksim import (
     CLOCK_FACTORIES,
+    add_scenario_args,
     make_clock_factory,
     run_scenario,
     save_run,
+    scenario_config_from_args,
+    scenario_config_to_dict,
+    scenario_options_from_args,
 )
 
 
@@ -77,7 +81,7 @@ def lease_duration_label(lease_duration: float) -> str:
 
 
 def is_lease_clock(clock: str) -> bool:
-    return clock in {"lease_dvv", "membership_lease_dvv"}
+    return clock in {"lease_dvv", "lease_dvv_client", "membership_lease_dvv"}
 
 
 def clock_variant(clock: str, lease_duration: float, lease_duration_count: int) -> str:
@@ -551,9 +555,9 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
 def clock_track(clock: str) -> str:
     if clock == "vv":
         return "Exact Baseline"
-    if clock == "dvv":
+    if clock in {"dvv", "dvv_client"}:
         return "DVV"
-    if clock == "itc":
+    if clock in {"itc", "itc_client"}:
         return "Interval Tree Clock"
     if clock.startswith("lease_dvv"):
         return "Approximate DVV"
@@ -664,29 +668,17 @@ def build_parser() -> configargparse.ArgParser:
     parser.add("--clocks", nargs="+", choices=sorted(CLOCK_FACTORIES), default=["vv", "dvv", "lease_dvv"])
     parser.add("--profiles", nargs="+", choices=["stable", "low", "sustained", "burst"], default=["stable", "sustained", "burst"])
     parser.add("--seeds", nargs="+", type=int, default=[7, 17, 29])
-    parser.add("--sim-time", type=float, default=240.0)
-    parser.add("--initial-size", type=int, default=10)
-    parser.add("--write-interval", type=float, default=5.0)
-    parser.add("--client-think-time", type=float, default=4.0)
-    parser.add("--merge-probability", type=float, default=0.35)
-    parser.add("--burst-interval", type=float, default=18.0)
-    parser.add("--burst-writers", type=int, default=4)
-    parser.add("--burst-spread", type=float, default=2.0)
-    parser.add("--merge-delay", type=float, default=10.0)
-    parser.add("--same-coordinator-probability", type=float, default=0.75)
-    parser.add("--max-nodes", type=int, default=28)
-    parser.add("--min-nodes", type=int, default=4)
-    parser.add("--min-lat", type=float, default=1.0)
-    parser.add("--max-lat", type=float, default=5.0)
-    parser.add("--key-count", type=int, default=12)
-    parser.add("--hot-key-probability", type=float, default=0.65)
-    parser.add("--client-count", type=int, default=128)
-    parser.add("--replication-factor", type=int, default=4)
-    parser.add("--sample-interval", type=float, default=10.0)
+    add_scenario_args(parser)
     parser.add("--lease-duration", type=float, default=16.0)
     parser.add("--lease-durations", nargs="+", type=float, default=None)
+    parser.add(
+        "--fixed-lease-duration",
+        action="store_true",
+        help="Ignore --lease-durations and run lease clocks only at --lease-duration.",
+    )
     parser.add("--analysis-window", type=float, default=12.0)
     parser.add("--write-pdf", action="store_true", help="Also write PDF copies of generated report plots.")
+    parser.add("--progress", action="store_true", help="Show a tqdm progress bar for each simulation run.")
     parser.add("--output-dir", default="output/experiments")
     parser.add("--experiment-name", default="per_object_clock_study")
     return parser
@@ -696,7 +688,7 @@ def main() -> None:
     global WRITE_PDF
     args = build_parser().parse_args()
     WRITE_PDF = args.write_pdf
-    lease_durations = args.lease_durations or [args.lease_duration]
+    lease_durations = [args.lease_duration] if args.fixed_lease_duration else (args.lease_durations or [args.lease_duration])
     experiment_dir = Path(args.output_dir) / args.experiment_name
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
@@ -704,29 +696,13 @@ def main() -> None:
         "clocks": args.clocks,
         "profiles": args.profiles,
         "seeds": args.seeds,
-        "sim_time": args.sim_time,
-        "initial_size": args.initial_size,
-        "write_interval": args.write_interval,
-        "client_think_time": args.client_think_time,
-        "merge_probability": args.merge_probability,
-        "burst_interval": args.burst_interval,
-        "burst_writers": args.burst_writers,
-        "burst_spread": args.burst_spread,
-        "merge_delay": args.merge_delay,
-        "same_coordinator_probability": args.same_coordinator_probability,
-        "max_nodes": args.max_nodes,
-        "min_nodes": args.min_nodes,
-        "min_lat": args.min_lat,
-        "max_lat": args.max_lat,
-        "key_count": args.key_count,
-        "hot_key_probability": args.hot_key_probability,
-        "client_count": args.client_count,
-        "replication_factor": args.replication_factor,
-        "sample_interval": args.sample_interval,
-        "lease_duration": lease_durations[0],
+        **scenario_options_from_args(args),
+        "lease_duration": args.lease_duration,
         "lease_durations": lease_durations,
+        "fixed_lease_duration": args.fixed_lease_duration,
         "analysis_window": args.analysis_window,
         "write_pdf": args.write_pdf,
+        "progress": args.progress,
         "output_dir": args.output_dir,
         "experiment_name": args.experiment_name,
     }
@@ -741,36 +717,18 @@ def main() -> None:
                 for seed in args.seeds:
                     run_name = f"{profile}_{variant}_seed{seed}"
                     run_dir = experiment_dir / run_name
+                    scenario_config = scenario_config_from_args(args, profile=profile, seed=seed)
                     metrics = run_scenario(
-                        profile=profile,
+                        config=scenario_config,
                         clock_factory=make_clock_factory(clock, lease_duration),
-                        sim_time=args.sim_time,
-                        seed=seed,
-                        initial_size=args.initial_size,
-                        write_interval=args.write_interval,
-                        max_nodes=args.max_nodes,
-                        min_nodes=args.min_nodes,
-                        min_lat=args.min_lat,
-                        max_lat=args.max_lat,
-                        key_count=args.key_count,
-                        hot_key_probability=args.hot_key_probability,
-                        client_count=args.client_count,
-                        replication_factor=args.replication_factor,
-                        sample_interval=args.sample_interval,
-                        client_think_time=args.client_think_time,
-                        merge_probability=args.merge_probability,
-                        burst_interval=args.burst_interval,
-                        burst_writers=args.burst_writers,
-                        burst_spread=args.burst_spread,
-                        merge_delay=args.merge_delay,
-                        same_coordinator_probability=args.same_coordinator_probability,
+                        progress=args.progress,
+                        progress_label=run_name,
                     )
                     run_config = {
                         **experiment_config,
-                        "profile": profile,
+                        **scenario_config_to_dict(scenario_config),
                         "clock": clock,
                         "clock_variant": variant,
-                        "seed": seed,
                         "lease_duration": lease_duration if is_lease_clock(clock) else None,
                     }
                     save_run(

@@ -1,7 +1,7 @@
 # Client-count sensitivity: low writer cardinality.
 # Purpose: VV metadata should be less stressed when fewer distinct client actors write objects.
 
-clocks: [vv, dvv, lease_dvv, vv_vnode]
+clocks: [vv, dvv, lease_dvv]
 profiles: [stable, sustained]
 seeds: [1, 2, 3]
 

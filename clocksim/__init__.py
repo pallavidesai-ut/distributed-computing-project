@@ -1,5 +1,6 @@
 """Per-object causality simulator public API."""
 
+from .config import *
 from .context import *
 from .clocks import *
 from .metrics import *

@@ -32,7 +32,7 @@ def tiny_scenario(clock: str, *, lease_duration: float = 60.0):
     )
 
 
-@pytest.mark.parametrize("clock", ["vv", "dvv", "itc"])
+@pytest.mark.parametrize("clock", ["vv", "dvv", "dvv_client", "itc"])
 def test_exact_clocks_have_perfect_history_fidelity_in_smoke_run(clock: str) -> None:
     metrics = tiny_scenario(clock)
     summary = metrics.summary(40.0)

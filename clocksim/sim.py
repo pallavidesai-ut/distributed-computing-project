@@ -17,10 +17,10 @@ import heapq
 import json
 import random
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import CHURN_PROFILES, ClusterConfig, NetworkConfig, ScenarioConfig, WorkloadConfig, scenario_config_from_kwargs
 from .metrics import MetricsCollector
 
 class Environment:
@@ -35,45 +35,40 @@ class Environment:
         heapq.heappush(self._queue, (self.now + delay, self._seq, callback))
         self._seq += 1
 
-    def run(self, until: float) -> None:
-        while self._queue:
-            t, _, callback = self._queue[0]
-            if t > until:
-                break
-            heapq.heappop(self._queue)
-            self.now = t
-            callback()
+    def run(self, until: float, *, progress: bool = False, desc: str | None = None) -> None:
+        progress_bar = None
+        if progress:
+            try:
+                from tqdm.auto import tqdm
+            except ImportError as exc:  # pragma: no cover - dependency/configuration guard
+                raise RuntimeError("Progress display requires tqdm. Install project dependencies or omit --progress.") from exc
+            progress_bar = tqdm(
+                total=until,
+                initial=min(self.now, until),
+                desc=desc or "simulation",
+                unit="sim-time",
+            )
+
+        try:
+            while self._queue:
+                t, _, callback = self._queue[0]
+                if t > until:
+                    if progress_bar is not None:
+                        progress_bar.update(max(0.0, until - progress_bar.n))
+                    break
+                heapq.heappop(self._queue)
+                self.now = t
+                if progress_bar is not None:
+                    progress_bar.update(max(0.0, min(self.now, until) - progress_bar.n))
+                callback()
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
 
 from .clocks import ClockModel
 from .context import Dot, EventId
 from .store import Message, Node, VersionRecord
-
-CHURN_PROFILES = {
-    "stable": {"join_rate": 0.0, "leave_rate": 0.0, "burst_size": 0, "burst_interval": None},
-    "low": {"join_rate": 0.01, "leave_rate": 0.01, "burst_size": 0, "burst_interval": None},
-    "sustained": {"join_rate": 0.035, "leave_rate": 0.035, "burst_size": 0, "burst_interval": None},
-    "burst": {"join_rate": 0.01, "leave_rate": 0.01, "burst_size": 6, "burst_interval": 45.0},
-}
-
-
-@dataclass
-class WorkloadConfig:
-    key_count: int
-    hot_key_probability: float
-    client_count: int
-    write_interval: float
-    client_think_time: float
-    merge_probability: float
-    burst_interval: float
-    burst_writers: int
-    burst_spread: float
-    merge_delay: float
-    same_coordinator_probability: float
-    replication_factor: int
-
-
-
 
 class Cluster:
     def __init__(
@@ -82,34 +77,52 @@ class Cluster:
         env: Environment,
         metrics: MetricsCollector,
         clock_model: ClockModel,
-        profile: str,
-        initial_size: int,
-        max_nodes: int,
-        min_nodes: int,
-        min_lat: float,
-        max_lat: float,
-        sample_interval: float,
-        workload: WorkloadConfig,
+        config: ScenarioConfig | None = None,
+        profile: str | None = None,
+        initial_size: int | None = None,
+        max_nodes: int | None = None,
+        min_nodes: int | None = None,
+        min_lat: float | None = None,
+        max_lat: float | None = None,
+        sample_interval: float | None = None,
+        workload: WorkloadConfig | None = None,
     ) -> None:
+        if config is None:
+            workload = workload or WorkloadConfig()
+            config = ScenarioConfig(
+                profile=profile or ScenarioConfig.profile,
+                cluster=ClusterConfig(
+                    initial_size=initial_size if initial_size is not None else ClusterConfig.initial_size,
+                    max_nodes=max_nodes if max_nodes is not None else ClusterConfig.max_nodes,
+                    min_nodes=min_nodes if min_nodes is not None else ClusterConfig.min_nodes,
+                    replication_factor=workload.replication_factor,
+                    sample_interval=sample_interval if sample_interval is not None else ClusterConfig.sample_interval,
+                ),
+                workload=workload,
+                network=NetworkConfig(
+                    min_lat=min_lat if min_lat is not None else NetworkConfig.min_lat,
+                    max_lat=max_lat if max_lat is not None else NetworkConfig.max_lat,
+                ),
+            )
         self.env = env
         self.metrics = metrics
         self.clock_model = clock_model
-        self.profile = CHURN_PROFILES[profile]
-        self.max_nodes = max_nodes
-        self.min_nodes = min_nodes
-        self.min_lat = min_lat
-        self.max_lat = max_lat
-        self.sample_interval = sample_interval
-        self.workload = workload
+        self.profile = CHURN_PROFILES[config.profile]
+        self.max_nodes = config.cluster.max_nodes
+        self.min_nodes = config.cluster.min_nodes
+        self.replication_factor = config.cluster.replication_factor
+        self.network = config.network
+        self.sample_interval = config.cluster.sample_interval
+        self.workload = config.workload
         self.nodes: list[Node] = []
         self.node_counter = 0
         self.version_counter = 0
-        self.clients = [f"c{index:04d}" for index in range(1, workload.client_count + 1)]
+        self.clients = [f"c{index:04d}" for index in range(1, self.workload.client_count + 1)]
         self.client_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
             lambda: defaultdict(list)
         )
 
-        for _ in range(initial_size):
+        for _ in range(config.cluster.initial_size):
             self._add_node()
 
     def active_nodes(self) -> list[Node]:
@@ -160,7 +173,7 @@ class Cluster:
 
     def replication_targets(self, coordinator: Node) -> list[Node]:
         peers = [node for node in self.active_nodes() if node.id != coordinator.id]
-        max_targets = max(self.workload.replication_factor - 1, 0)
+        max_targets = max(self.replication_factor - 1, 0)
         if max_targets <= 0 or not peers:
             return []
         if max_targets >= len(peers):
@@ -253,7 +266,7 @@ class Cluster:
                 version=version,
                 sent_at=self.env.now,
             )
-            delay = random.uniform(self.min_lat, self.max_lat)
+            delay = random.uniform(self.network.min_lat, self.network.max_lat)
             self.env.schedule(delay, self._make_delivery(message))
 
     def _make_delivery(self, message: Message) -> Callable[[], None]:
@@ -388,8 +401,8 @@ class Cluster:
         self.metrics.record_leave(victim.id, self.active_count(), self.env.now)
 
     def _schedule_churn_event(self) -> None:
-        join_rate = self.profile["join_rate"]
-        leave_rate = self.profile["leave_rate"]
+        join_rate = self.profile.join_rate
+        leave_rate = self.profile.leave_rate
         total_rate = join_rate + leave_rate
         if total_rate <= 0:
             return
@@ -406,8 +419,8 @@ class Cluster:
         self.env.schedule(delay, churn)
 
     def _schedule_burst_churn(self) -> None:
-        burst_size = self.profile["burst_size"]
-        interval = self.profile["burst_interval"]
+        burst_size = self.profile.burst_size
+        interval = self.profile.burst_interval
         if burst_size <= 0 or interval is None:
             return
 
@@ -486,61 +499,31 @@ class Cluster:
 
 def run_scenario(
     *,
-    profile: str,
     clock_factory: Callable[[], ClockModel],
-    sim_time: float,
-    seed: int,
-    initial_size: int,
-    write_interval: float,
-    max_nodes: int,
-    min_nodes: int,
-    min_lat: float,
-    max_lat: float,
-    key_count: int,
-    hot_key_probability: float,
-    client_count: int,
-    replication_factor: int,
-    sample_interval: float,
-    client_think_time: float = 4.0,
-    merge_probability: float = 0.35,
-    burst_interval: float = 18.0,
-    burst_writers: int = 4,
-    burst_spread: float = 2.0,
-    merge_delay: float = 10.0,
-    same_coordinator_probability: float = 0.75,
+    config: ScenarioConfig | None = None,
+    progress: bool = False,
+    progress_label: str | None = None,
+    **legacy_kwargs: Any,
 ) -> MetricsCollector:
-    random.seed(seed)
+    """Run one scenario.
+
+    New code should pass ``config``. ``legacy_kwargs`` keeps older tests and
+    scripts working while centralizing the many scenario knobs in dataclasses.
+    """
+
+    if config is None:
+        config = scenario_config_from_kwargs(**legacy_kwargs)
+    random.seed(config.seed)
     env = Environment()
     metrics = MetricsCollector()
-    workload = WorkloadConfig(
-        key_count=key_count,
-        hot_key_probability=hot_key_probability,
-        client_count=client_count,
-        write_interval=write_interval,
-        client_think_time=client_think_time,
-        merge_probability=merge_probability,
-        burst_interval=burst_interval,
-        burst_writers=burst_writers,
-        burst_spread=burst_spread,
-        merge_delay=merge_delay,
-        same_coordinator_probability=same_coordinator_probability,
-        replication_factor=replication_factor,
-    )
     cluster = Cluster(
         env=env,
         metrics=metrics,
         clock_model=clock_factory(),
-        profile=profile,
-        initial_size=initial_size,
-        max_nodes=max_nodes,
-        min_nodes=min_nodes,
-        min_lat=min_lat,
-        max_lat=max_lat,
-        sample_interval=sample_interval,
-        workload=workload,
+        config=config,
     )
     cluster.start()
-    env.run(until=sim_time)
+    env.run(until=config.sim_time, progress=progress, desc=progress_label)
     return metrics
 
 

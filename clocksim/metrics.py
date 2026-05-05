@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,86 @@ def percentile(values: list[float], pct: float) -> float:
         return ordered[low]
     weight = rank - low
     return ordered[low] * (1 - weight) + ordered[high] * weight
+
+
+@dataclass(frozen=True)
+class WriteMetric:
+    t: float
+    version_id: str
+    node: str
+    actor_id: str
+    key: str
+    phase: str
+    read_size: int
+    metadata_type: str
+    metadata_bytes: int
+    metadata_components: int
+    actor_entries: int
+    represented_events: int
+    true_events: int
+    pruned_actors: int
+    pruned_events: int
+    was_pruned: int
+    target_replicas: int
+    is_hot_key: int
+
+
+@dataclass(frozen=True)
+class AccuracyMetric:
+    t: float
+    version_id: str
+    key: str
+    node: str
+    precision: float
+    recall: float
+    false_positive_events: int
+    false_negative_events: int
+    was_pruned: int
+    is_hot_key: int
+
+
+@dataclass(frozen=True)
+class DeliveryMetric:
+    t: float
+    version_id: str
+    key: str
+    sender: str
+    receiver: str
+    latency: float
+    action: str
+    sibling_count_after: int
+
+
+@dataclass(frozen=True)
+class DecisionMetric:
+    t: float
+    node: str
+    key: str
+    incoming_id: str
+    existing_id: str
+    true_relation: str
+    clock_relation: str
+    final_action: str
+    is_hot_key: int
+
+
+@dataclass(frozen=True)
+class SnapshotMetric:
+    t: float
+    active_nodes: int
+    avg_versions_per_key: float
+    avg_hot_key_siblings: float
+    max_hot_key_siblings: int
+    avg_metadata_bytes: float
+    avg_actor_entries: float
+    avg_stale_actor_fraction: float
+
+
+@dataclass(frozen=True)
+class MembershipMetric:
+    t: float
+    node: str
+    cluster_size: int
 
 
 class MetricsCollector:
@@ -56,26 +137,28 @@ class MetricsCollector:
         target_replicas: int,
     ) -> None:
         self.writes.append(
-            {
-                "t": round_float(t),
-                "version_id": version.version_id,
-                "node": node_id,
-                "actor_id": actor_id,
-                "key": version.key,
-                "phase": version.phase,
-                "read_size": version.read_size,
-                "metadata_type": version.stamp.serialize()["type"],
-                "metadata_bytes": metadata_bytes,
-                "metadata_components": metadata_components,
-                "actor_entries": actor_entries,
-                "represented_events": represented_events,
-                "true_events": true_events,
-                "pruned_actors": version.stamp.pruned_actor_count(),
-                "pruned_events": version.stamp.pruned_event_count(),
-                "was_pruned": int(version.stamp.was_pruned()),
-                "target_replicas": target_replicas,
-                "is_hot_key": int(is_hot_key),
-            }
+            asdict(
+                WriteMetric(
+                    t=round_float(t),
+                    version_id=version.version_id,
+                    node=node_id,
+                    actor_id=actor_id,
+                    key=version.key,
+                    phase=version.phase,
+                    read_size=version.read_size,
+                    metadata_type=version.stamp.serialize()["type"],
+                    metadata_bytes=metadata_bytes,
+                    metadata_components=metadata_components,
+                    actor_entries=actor_entries,
+                    represented_events=represented_events,
+                    true_events=true_events,
+                    pruned_actors=version.stamp.pruned_actor_count(),
+                    pruned_events=version.stamp.pruned_event_count(),
+                    was_pruned=int(version.stamp.was_pruned()),
+                    target_replicas=target_replicas,
+                    is_hot_key=int(is_hot_key),
+                )
+            )
         )
 
     def record_accuracy(
@@ -90,18 +173,20 @@ class MetricsCollector:
         is_hot_key: bool,
     ) -> None:
         self.accuracy.append(
-            {
-                "t": round_float(t),
-                "version_id": version.version_id,
-                "key": version.key,
-                "node": version.origin,
-                "precision": round_float(precision),
-                "recall": round_float(recall),
-                "false_positive_events": false_positive_events,
-                "false_negative_events": false_negative_events,
-                "was_pruned": int(version.stamp.was_pruned()),
-                "is_hot_key": int(is_hot_key),
-            }
+            asdict(
+                AccuracyMetric(
+                    t=round_float(t),
+                    version_id=version.version_id,
+                    key=version.key,
+                    node=version.origin,
+                    precision=round_float(precision),
+                    recall=round_float(recall),
+                    false_positive_events=false_positive_events,
+                    false_negative_events=false_negative_events,
+                    was_pruned=int(version.stamp.was_pruned()),
+                    is_hot_key=int(is_hot_key),
+                )
+            )
         )
 
     def record_delivery(
@@ -117,16 +202,18 @@ class MetricsCollector:
         sibling_count_after: int,
     ) -> None:
         self.deliveries.append(
-            {
-                "t": round_float(t),
-                "version_id": version_id,
-                "key": key,
-                "sender": sender,
-                "receiver": receiver,
-                "latency": round_float(latency),
-                "action": action,
-                "sibling_count_after": sibling_count_after,
-            }
+            asdict(
+                DeliveryMetric(
+                    t=round_float(t),
+                    version_id=version_id,
+                    key=key,
+                    sender=sender,
+                    receiver=receiver,
+                    latency=round_float(latency),
+                    action=action,
+                    sibling_count_after=sibling_count_after,
+                )
+            )
         )
 
     def record_decision(
@@ -143,17 +230,19 @@ class MetricsCollector:
         is_hot_key: bool,
     ) -> None:
         self.decisions.append(
-            {
-                "t": round_float(t),
-                "node": node_id,
-                "key": key,
-                "incoming_id": incoming_id,
-                "existing_id": existing_id,
-                "true_relation": true_relation,
-                "clock_relation": clock_relation,
-                "final_action": final_action,
-                "is_hot_key": int(is_hot_key),
-            }
+            asdict(
+                DecisionMetric(
+                    t=round_float(t),
+                    node=node_id,
+                    key=key,
+                    incoming_id=incoming_id,
+                    existing_id=existing_id,
+                    true_relation=true_relation,
+                    clock_relation=clock_relation,
+                    final_action=final_action,
+                    is_hot_key=int(is_hot_key),
+                )
+            )
         )
 
     def record_snapshot(
@@ -169,34 +258,40 @@ class MetricsCollector:
         avg_stale_actor_fraction: float,
     ) -> None:
         self.snapshots.append(
-            {
-                "t": round_float(t),
-                "active_nodes": active_nodes,
-                "avg_versions_per_key": round_float(avg_versions_per_key),
-                "avg_hot_key_siblings": round_float(avg_hot_key_siblings),
-                "max_hot_key_siblings": max_hot_key_siblings,
-                "avg_metadata_bytes": round_float(avg_metadata_bytes),
-                "avg_actor_entries": round_float(avg_actor_entries),
-                "avg_stale_actor_fraction": round_float(avg_stale_actor_fraction),
-            }
+            asdict(
+                SnapshotMetric(
+                    t=round_float(t),
+                    active_nodes=active_nodes,
+                    avg_versions_per_key=round_float(avg_versions_per_key),
+                    avg_hot_key_siblings=round_float(avg_hot_key_siblings),
+                    max_hot_key_siblings=max_hot_key_siblings,
+                    avg_metadata_bytes=round_float(avg_metadata_bytes),
+                    avg_actor_entries=round_float(avg_actor_entries),
+                    avg_stale_actor_fraction=round_float(avg_stale_actor_fraction),
+                )
+            )
         )
 
     def record_join(self, node_id: str, cluster_size: int, t: float) -> None:
         self.joins.append(
-            {
-                "t": round_float(t),
-                "node": node_id,
-                "cluster_size": cluster_size,
-            }
+            asdict(
+                MembershipMetric(
+                    t=round_float(t),
+                    node=node_id,
+                    cluster_size=cluster_size,
+                )
+            )
         )
 
     def record_leave(self, node_id: str, cluster_size: int, t: float) -> None:
         self.leaves.append(
-            {
-                "t": round_float(t),
-                "node": node_id,
-                "cluster_size": cluster_size,
-            }
+            asdict(
+                MembershipMetric(
+                    t=round_float(t),
+                    node=node_id,
+                    cluster_size=cluster_size,
+                )
+            )
         )
 
     def save(self, output_dir: Path, run_name: str) -> None:

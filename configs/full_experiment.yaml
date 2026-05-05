@@ -1,6 +1,5 @@
 clocks:
   - vv
-  - vv_vnode
   - dvv
   - lease_dvv
 profiles:

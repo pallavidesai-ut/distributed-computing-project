@@ -2,7 +2,7 @@
 # Purpose: amplify divergence across replicas and highlight conflict-resolution differences.
 # Justification: low replication factor with many clients stresses partial visibility; exact clocks should remain correct, while coarse vnode VV and short leases should show clearer operational costs.
 
-clocks: [vv, dvv, lease_dvv, vv_vnode]
+clocks: [vv, dvv, lease_dvv]
 profiles: [low, sustained]
 seeds: [1, 2, 3]
 

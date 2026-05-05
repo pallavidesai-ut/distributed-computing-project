@@ -3,7 +3,9 @@ from __future__ import annotations
 from clocksim import (
     CausalContext,
     Dot,
+    ClientDottedVersionVectorModel,
     DottedVersionVectorModel,
+    LeaseClientDottedVersionVectorModel,
     LeaseDottedVersionVectorModel,
     MembershipLeaseDottedVersionVectorModel,
     VersionVectorModel,
@@ -11,7 +13,7 @@ from clocksim import (
 
 
 def test_vv_and_dvv_preserve_read_ancestry_in_same_object_chain() -> None:
-    for model in [VersionVectorModel(), DottedVersionVectorModel()]:
+    for model in [VersionVectorModel(), DottedVersionVectorModel(), ClientDottedVersionVectorModel()]:
         state = model.make_state("n1")
         first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-a")
         read_context = model.build_read_context([])
@@ -25,6 +27,37 @@ def test_vv_and_dvv_preserve_read_ancestry_in_same_object_chain() -> None:
         assert second.represented_context().contains(first.dot)
         assert model.compare_stamps(second, first) == "dominates"
 
+
+
+def test_client_dvv_uses_client_actor_domain_for_direct_itc_comparison() -> None:
+    model = ClientDottedVersionVectorModel()
+    state = model.make_state("n1")
+    first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-a")
+    second = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-b")
+    merged = model.issue_stamp(
+        state,
+        "k0",
+        model.build_read_context([]),
+        now=1.0,
+        actor_id="client-c",
+    )
+
+    assert first.dot.actor == "client-a"
+    assert second.dot.actor == "client-b"
+    assert model.compare_stamps(first, second) == "concurrent"
+    assert merged.dot.actor == "client-c"
+
+
+def test_expired_lease_client_dvv_prunes_client_actor_history() -> None:
+    read_context = CausalContext(prefix={"client-b": 3})
+    model = LeaseClientDottedVersionVectorModel(lease_duration=1.0)
+    state = model.make_state("n1")
+
+    stamp = model.issue_stamp(state, "k0", read_context, now=10.0, actor_id="client-a")
+
+    assert stamp.dot.actor == "client-a"
+    assert stamp.was_pruned()
+    assert not stamp.represented_context().contains(Dot("client-b", 3))
 
 
 def test_long_lease_dvv_preserves_recent_observed_actor_history() -> None:
