@@ -21,14 +21,10 @@ seeds:
   - 3
   - 4
   - 5
-  - 6
-  - 7
-  - 8
-  - 9 
-  - 10
 
 
-sim-time: 10000.0
+
+sim-time: 1000.0
 initial-size: 10
 write-interval: 5.0
 client-think-time: 4.0
