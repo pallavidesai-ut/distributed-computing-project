@@ -73,6 +73,18 @@ def test_expired_lease_client_dvv_prunes_client_actor_history() -> None:
     assert not stamp.represented_context().contains(Dot("client-b", 3))
 
 
+def test_lease_dvv_renews_only_dot_actor_not_transitive_context() -> None:
+    model = LeaseDottedVersionVectorModel(lease_duration=10.0)
+    state = model.make_state("n1")
+    read_context = CausalContext(prefix={"stale-actor": 5})
+
+    stamp = model.issue_stamp(state, "k0", read_context, now=1.0, actor_id="fresh-actor")
+
+    assert stamp.dot.actor == "fresh-actor"
+    assert state.leases["k0"]["fresh-actor"] == 11.0
+    assert "stale-actor" not in state.leases["k0"]
+
+
 def test_long_lease_dvv_preserves_recent_observed_actor_history() -> None:
     lease_model = LeaseDottedVersionVectorModel(lease_duration=100.0)
     state = lease_model.make_state("n1")

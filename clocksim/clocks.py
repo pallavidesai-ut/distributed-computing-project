@@ -439,9 +439,10 @@ class LeaseClientDottedVersionVectorModel(ClientDottedVersionVectorModel):
         stamp: BaseStamp,
         now: float,
     ) -> None:
-        expiry = now + self.lease_duration
-        for actor in stamp.actor_entries():
-            state.leases[key][actor] = expiry
+        # Dot-renewed leases: only direct evidence from the actor's own new
+        # event renews its lease. Transitive mentions in the causal context do
+        # not keep stale actors alive.
+        state.leases[key][stamp.dot.actor] = now + self.lease_duration
 
     def issue_stamp(
         self,
@@ -490,9 +491,10 @@ class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
         now: float,
     ) -> None:
         super().observe_stamp(state, key, stamp, now)
-        expiry = now + self.lease_duration
-        for actor in stamp.actor_entries():
-            state.leases[key][actor] = expiry
+        # Dot-renewed leases: only direct evidence from the actor's own new
+        # event renews its lease. Transitive mentions in the causal context do
+        # not keep stale actors alive.
+        state.leases[key][stamp.dot.actor] = now + self.lease_duration
 
     def issue_stamp(
         self,

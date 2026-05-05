@@ -97,7 +97,7 @@ This is the main exact optimization under study.
 
 - Starts from the DVV representation.
 - Before issuing a new write, expired actors/events are pruned from the context.
-- Leases are renewed when stamps are observed.
+- Leases are renewed only by direct evidence from an actor's own dot (`stamp.dot.actor`); transitive mentions in another actor's causal context do not renew stale actors.
 - Expected behavior: precision remains high because pruning forgets events rather than inventing them; recall may drop.
 - Expected cost: shorter leases reduce metadata but increase stale sibling retention.
 
