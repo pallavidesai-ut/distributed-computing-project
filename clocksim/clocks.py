@@ -188,36 +188,6 @@ class VersionVectorModel(ClockModel):
         return VVStamp(vector=vector, new_dot=Dot(actor_id, next_counter))
 
 
-class VnodeVersionVectorModel(ClockModel):
-    name = "vv_vnode"
-
-    def build_read_context(self, versions: list["VersionRecord"]) -> CausalContext:
-        vector: dict[str, int] = {}
-        for version in versions:
-            context = version.stamp.represented_context()
-            for actor, counter in context.prefix.items():
-                vector[actor] = max(vector.get(actor, 0), counter)
-            for dot in context.dots:
-                vector[dot.actor] = max(vector.get(dot.actor, 0), dot.counter)
-        return CausalContext(prefix=vector, dots=set())
-
-    def issue_stamp(
-        self,
-        state: NodeClockState,
-        key: str,
-        read_context: CausalContext,
-        now: float,
-        actor_id: str,
-    ) -> BaseStamp:
-        vector = dict(read_context.prefix)
-        next_counter = max(
-            state.local_counters.get(key, 0),
-            vector.get(state.node_id, 0),
-        ) + 1
-        state.local_counters[key] = next_counter
-        vector[state.node_id] = next_counter
-        return VVStamp(vector=vector, new_dot=Dot(state.node_id, next_counter))
-
 
 class DottedVersionVectorModel(ClockModel):
     name = "dvv"
@@ -395,8 +365,6 @@ class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
 def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], ClockModel]:
     if clock_name in {"vv", "vector"}:
         return VersionVectorModel
-    if clock_name in {"vv_vnode", "vector_vnode"}:
-        return VnodeVersionVectorModel
     if clock_name == "dvv":
         return DottedVersionVectorModel
     if clock_name == "lease_dvv":
@@ -411,8 +379,6 @@ CLOCK_FACTORIES: dict[str, Callable[[], ClockModel]] = {
     "lease_dvv": lambda: LeaseDottedVersionVectorModel(lease_duration=60.0),
     "membership_lease_dvv": lambda: MembershipLeaseDottedVersionVectorModel(lease_duration=60.0),
     "vector": VersionVectorModel,
-    "vector_vnode": VnodeVersionVectorModel,
     "vv": VersionVectorModel,
-    "vv_vnode": VnodeVersionVectorModel,
 }
 

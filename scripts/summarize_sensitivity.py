@@ -50,7 +50,7 @@ def make_plot(rows: list[dict[str, object]], dimension: str, output_dir: Path) -
     if not subset:
         return
     profiles = sorted({str(row["profile"]) for row in subset})
-    clocks = [clock for clock in ["vv", "dvv", "lease_dvv_L16", "vv_vnode"] if any(row["clock"] == clock for row in subset)]
+    clocks = [clock for clock in ["vv", "dvv", "lease_dvv_L16"] if any(row["clock"] == clock for row in subset)]
     values = sorted({int(row["value"]) for row in subset})
     fig, axes = plt.subplots(1, len(profiles), figsize=(5 * len(profiles), 4), sharey=True)
     if len(profiles) == 1:

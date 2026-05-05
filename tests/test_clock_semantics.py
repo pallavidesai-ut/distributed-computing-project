@@ -7,7 +7,6 @@ from clocksim import (
     Dot,
     DottedVersionVectorModel,
     LeaseDottedVersionVectorModel,
-    VnodeVersionVectorModel,
 )
 
 
@@ -21,16 +20,6 @@ class ClockSemanticTests(unittest.TestCase):
         second = model.issue_stamp(state, "k0", empty_read, now=0.0, actor_id="c2")
 
         self.assertEqual(model.compare_stamps(second, first), "concurrent")
-
-    def test_vnode_vv_collapses_same_coordinator_concurrency(self) -> None:
-        model = VnodeVersionVectorModel()
-        state = model.make_state("n1")
-        empty_read = CausalContext()
-
-        first = model.issue_stamp(state, "k0", empty_read, now=0.0, actor_id="c1")
-        second = model.issue_stamp(state, "k0", empty_read, now=0.0, actor_id="c2")
-
-        self.assertEqual(model.compare_stamps(second, first), "dominates")
 
     def test_lease_dvv_prunes_expired_actor_history(self) -> None:
         model = LeaseDottedVersionVectorModel(lease_duration=1.0)
