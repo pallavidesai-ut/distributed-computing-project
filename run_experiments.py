@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import configargparse
+from urllib.parse import quote as url_quote
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
@@ -41,6 +42,11 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _markdown_path(path: Path) -> str:
+    resolved = str(Path(path).resolve())
+    return f"[`{resolved}`](file://{url_quote(resolved, safe='/')})"
 
 
 def load_csv(path: Path) -> list[dict[str, str]]:
@@ -83,6 +89,10 @@ def lease_duration_label(lease_duration: float) -> str:
 
 def is_lease_clock(clock: str) -> bool:
     return clock in {"lease_dvv", "lease_dvv_client", "membership_lease_dvv"}
+
+
+OBJECT_METADATA_KEY = "replica_state.avg_sibling_set_metadata_bytes"
+WRITE_STAMP_METADATA_KEY = "metadata.avg_metadata_bytes"
 
 
 def clock_variant(clock: str, lease_duration: float, lease_duration_count: int) -> str:
@@ -325,9 +335,9 @@ def make_tradeoff_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
         ]
         if dvv is None or not lease_rows:
             continue
-        dvv_bytes = float(dvv.get("metadata.avg_metadata_bytes", 0.0))
+        dvv_bytes = float(dvv.get(WRITE_STAMP_METADATA_KEY, 0.0))
         for lease in lease_rows:
-            lease_bytes = float(lease.get("metadata.avg_metadata_bytes", 0.0))
+            lease_bytes = float(lease.get(WRITE_STAMP_METADATA_KEY, 0.0))
             reduction = ((dvv_bytes - lease_bytes) / dvv_bytes * 100.0) if dvv_bytes else 0.0
             recall_loss = max(
                 float(dvv.get("accuracy.avg_recall", 0.0)) - float(lease.get("accuracy.avg_recall", 0.0)),
@@ -384,7 +394,8 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
                 "profile": row["profile"],
                 "clock": row["clock"],
                 "lease_duration": row["lease_duration"],
-                "avg_metadata_bytes": row.get("metadata.avg_metadata_bytes", 0.0),
+                "avg_metadata_bytes": row.get(WRITE_STAMP_METADATA_KEY, 0.0),
+                "avg_sibling_set_metadata_bytes": row.get(OBJECT_METADATA_KEY, 0.0),
                 "avg_recall": row.get("accuracy.avg_recall", 0.0),
                 "missed_conflict_rate": row.get("decision_quality.missed_conflict_rate", 0.0),
                 "stale_sibling_rate": row.get("decision_quality.stale_sibling_rate", 0.0),
@@ -394,7 +405,8 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
     write_csv(output_dir / "lease_duration_ablation.csv", table_rows)
 
     specs = [
-        ("metadata.avg_metadata_bytes", "Average metadata bytes", "lease_ablation_metadata.png"),
+        (WRITE_STAMP_METADATA_KEY, "Average metadata bytes", "lease_ablation_metadata.png"),
+        (OBJECT_METADATA_KEY, "Average sibling-set metadata bytes", "lease_ablation_sibling_set_metadata.png"),
         ("accuracy.avg_recall", "Average history recall", "lease_ablation_recall.png"),
         ("decision_quality.stale_sibling_rate", "Stale sibling rate", "lease_ablation_stale_siblings.png"),
         ("metadata.pruned_write_rate", "Pruned write rate", "lease_ablation_pruning.png"),
@@ -444,21 +456,24 @@ def make_headline_table(rows: list[dict[str, object]], output_dir: Path) -> None
         lease_l16 = by_profile_clock.get((profile, "lease_dvv_L16"))
         if vv is None or dvv is None:
             continue
-        vv_bytes = float(vv.get("metadata.avg_metadata_bytes", 0.0))
-        dvv_bytes = float(dvv.get("metadata.avg_metadata_bytes", 0.0))
+        vv_bytes = float(vv.get(WRITE_STAMP_METADATA_KEY, 0.0))
+        dvv_bytes = float(dvv.get(WRITE_STAMP_METADATA_KEY, 0.0))
         reduction = ((vv_bytes - dvv_bytes) / vv_bytes * 100.0) if vv_bytes else 0.0
         table.append(
             {
                 "profile": profile,
                 "vv_bytes_mean": round(vv_bytes, 4),
-                "vv_bytes_stderr": vv.get("metadata.avg_metadata_bytes.stderr", 0.0),
+                "vv_bytes_stderr": vv.get(f"{WRITE_STAMP_METADATA_KEY}.stderr", 0.0),
                 "dvv_bytes_mean": round(dvv_bytes, 4),
-                "dvv_bytes_stderr": dvv.get("metadata.avg_metadata_bytes.stderr", 0.0),
+                "dvv_bytes_stderr": dvv.get(f"{WRITE_STAMP_METADATA_KEY}.stderr", 0.0),
                 "dvv_reduction_vs_vv_pct": round(reduction, 3),
+                "vv_sibling_set_bytes_mean": vv.get(OBJECT_METADATA_KEY, 0.0),
+                "dvv_sibling_set_bytes_mean": dvv.get(OBJECT_METADATA_KEY, 0.0),
                 "vv_recall": vv.get("accuracy.avg_recall", 0.0),
                 "dvv_recall": dvv.get("accuracy.avg_recall", 0.0),
-                "lease_l16_bytes_mean": lease_l16.get("metadata.avg_metadata_bytes", "") if lease_l16 else "",
-                "lease_l16_bytes_stderr": lease_l16.get("metadata.avg_metadata_bytes.stderr", "") if lease_l16 else "",
+                "lease_l16_bytes_mean": lease_l16.get(WRITE_STAMP_METADATA_KEY, "") if lease_l16 else "",
+                "lease_l16_bytes_stderr": lease_l16.get(f"{WRITE_STAMP_METADATA_KEY}.stderr", "") if lease_l16 else "",
+                "lease_l16_sibling_set_bytes_mean": lease_l16.get(OBJECT_METADATA_KEY, "") if lease_l16 else "",
                 "lease_l16_recall": lease_l16.get("accuracy.avg_recall", "") if lease_l16 else "",
             }
         )
@@ -510,7 +525,7 @@ def make_pareto_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
         profile = str(row["profile"])
         label = clock if clock not in plotted_labels else "_nolegend_"
         ax.scatter(
-            float(row.get("metadata.avg_metadata_bytes", 0.0)),
+            float(row.get(WRITE_STAMP_METADATA_KEY, 0.0)),
             float(row.get("accuracy.avg_recall", 0.0)),
             marker=markers.get(profile, "o"),
             s=55,
@@ -529,12 +544,13 @@ def make_pareto_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
 
 def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> None:
     specs = [
-        ("metadata.avg_metadata_bytes", "Avg metadata bytes", "Metadata Cost by Churn Profile", "metadata_bytes_vs_profile.png"),
+        (WRITE_STAMP_METADATA_KEY, "Avg metadata bytes", "Metadata Cost by Churn Profile", "metadata_bytes_vs_profile.png"),
         ("accuracy.avg_precision", "Average ancestry precision", "History Precision by Churn Profile", "precision_vs_profile.png"),
         ("accuracy.avg_recall", "Average ancestry recall", "History Recall by Churn Profile", "recall_vs_profile.png"),
         ("decision_quality.missed_conflict_rate", "Missed conflict rate", "Conflict Loss by Churn Profile", "missed_conflicts_vs_profile.png"),
         ("decision_quality.stale_sibling_rate", "Stale sibling rate", "Stale Sibling Retention by Churn Profile", "stale_siblings_vs_profile.png"),
         ("replica_state.avg_hot_key_siblings", "Avg hot-key siblings", "Sibling Pressure by Churn Profile", "hot_key_siblings_vs_profile.png"),
+        (OBJECT_METADATA_KEY, "Avg sibling-set metadata bytes", "DVV Shared Sibling-Set Metadata by Churn Profile", "sibling_set_metadata_bytes_vs_profile.png"),
         ("replica_state.avg_stale_actor_fraction", "Avg stale replica-actor fraction", "Stale Replica Actor Pressure by Churn Profile", "stale_actor_fraction_vs_profile.png"),
     ]
     for metric_key, ylabel, title, filename in specs:
@@ -578,6 +594,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "The simulator now separates true causal history from clock-encoded history, which makes the comparison meaningful on three axes:",
         "",
         "- metadata cost per write and per stored version",
+        "- secondary object/sibling-set metadata using DVV shared-summary factoring",
         "- conflict-handling accuracy on hot keys",
         "- ancestry loss introduced by lease pruning",
         "",
@@ -586,7 +603,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "| Clock | Encoded state | Main strength | Main failure mode under churn |",
         "| --- | --- | --- | --- |",
         "| VV | Exact per-object vector over the configured actor domain | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct actors touching an object |",
-        "| DVV | Prefix summary plus explicit dots over the same configured actor domain | Full ancestry precision with dotted context semantics | More complex representation and implementation |",
+        "| DVV | Prefix summary plus explicit dots over the same configured actor domain | Full ancestry precision with compact sibling-set metadata when siblings share context | More complex representation and implementation; single-write stamps can carry summary overhead |",
         "| ITC | Interval Tree Clock identity and event trees over the configured actor domain | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
         "",
@@ -605,6 +622,8 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         f"- Contention burst every {experiment_config['burst_interval']} time units with {experiment_config['burst_writers']} writers",
         "",
         "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV, DVV, and lease-DVV use the same configured actor domain (`physical`, `slot`, or `client`) so metadata differences are not caused by mixing actor identities.",
+        "",
+        "The headline metadata plot uses the stable per-write stamp metric. A separate sibling-set metadata plot accounts for the optimized DVV object form, where common sibling ancestry is stored once and each sibling contributes its dot.",
         "",
         "## Aggregated Findings",
         "",
@@ -629,8 +648,11 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
                 for item in rows
                 if str(item["profile"]) == profile and str(item["clock"]) == clock
             )
+            stamp_bytes = float(row.get(WRITE_STAMP_METADATA_KEY, 0.0))
+            sibling_set_bytes = float(row.get(OBJECT_METADATA_KEY, 0.0))
             lines.append(
-                f"- `{clock}` ({clock_track(clock)}): metadata {row.get('metadata.avg_metadata_bytes', 0):.2f} B, "
+                f"- `{clock}` ({clock_track(clock)}): metadata {stamp_bytes:.2f} B, "
+                f"sibling-set metadata {sibling_set_bytes:.2f} B, "
                 f"precision {row.get('accuracy.avg_precision', 0):.3f}, "
                 f"recall {row.get('accuracy.avg_recall', 0):.3f}, "
                 f"missed conflicts {row.get('decision_quality.missed_conflict_rate', 0):.3f}, "
@@ -644,12 +666,16 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
             "",
             "- `vv` is the exact vanilla baseline for the selected actor domain. It shows the metadata cost of preserving full object ancestry with a plain vector.",
             "- `dvv` should match `vv` on correctness while representing writes as explicit dots plus compact causal context over the same actor domain.",
+            "- `replica_state.avg_sibling_set_metadata_bytes` is a secondary object/read-response metric that credits DVV-family clocks for shared sibling summaries.",
             "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over the configured actor domain; compare its tree metadata against the exact VV and DVV baselines.",
             "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
             "",
             "## Outputs",
             "",
             "- `comparison_by_clock.csv`: aggregated metrics by churn profile and clock",
+            "- `headline_results.csv`: per-write metadata headline table with sibling-set side columns",
+            "- `metadata_bytes_vs_profile.png`: headline per-write stamp metadata plot",
+            "- `sibling_set_metadata_bytes_vs_profile.png`: secondary DVV shared-summary object metadata plot",
             "- `lease_duration_ablation.csv`: lease-DVV metadata/correctness ablation table",
             "- `time_series_report/`: profile-by-profile time-series plots",
             "- `metadata_reduction_vs_recall_loss.png`: lease-DVV tradeoff summary",
@@ -829,9 +855,8 @@ def main() -> None:
     make_comparison_plots(aggregated_rows, experiment_dir)
     write_time_series_report_plots(run_rows, experiment_dir)
     build_report(aggregated_rows, experiment_dir, experiment_config)
-    if args.progress:
-        print(f"Report: {experiment_dir / 'study_report.md'}")
-        print(f"Time series: {experiment_dir / 'time_series_report'}")
+    print(f"Report: {_markdown_path(experiment_dir / 'study_report.md')}")
+    print(f"Time series: {_markdown_path(experiment_dir / 'time_series_report')}")
 
 
 if __name__ == "__main__":

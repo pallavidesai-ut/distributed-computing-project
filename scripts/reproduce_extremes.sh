@@ -2,6 +2,7 @@
 set -euo pipefail
 
 CONFIGS=(
+  configs/dvv_sibling_fanout_study.yaml
   configs/extreme_hotspot_churn.yaml
   configs/extreme_sparse_replication.yaml
 )

@@ -1,0 +1,37 @@
+# DVV sibling fanout scenario.
+# Purpose: make DVV's optimized object representation visible in the main study.
+# The workload creates many concurrent siblings on one hot object, then delays
+# merge writes long enough for snapshot metrics to capture sibling-set metadata.
+
+clocks: [vv, dvv, lease_dvv]
+profiles: [stable, sustained]
+# Client actors create the wide actor namespace where repeated VV vectors are
+# expensive and shared-summary DVV has its intended advantage.
+actor-domain: client
+
+seeds: [1, 2, 3]
+
+sim-time: 180.0
+initial-size: 12
+write-interval: 1000.0
+client-think-time: 0.01
+merge-probability: 1.0
+burst-interval: 12.0
+burst-writers: 64
+burst-spread: 0.25
+merge-delay: 8.0
+same-coordinator-probability: 0.0
+max-nodes: 12
+min-nodes: 4
+min-lat: 0.05
+max-lat: 0.2
+key-count: 1
+hot-key-probability: 1.0
+client-count: 100000
+replication-factor: 8
+sample-interval: 2.0
+lease-duration: 16.0
+lease-durations: [8.0, 16.0, 32.0]
+analysis-window: 6.0
+output-dir: output/experiments
+experiment-name: dvv_sibling_fanout_study

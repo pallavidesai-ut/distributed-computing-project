@@ -92,6 +92,10 @@ def main() -> None:
                     "profile": row["profile"],
                     "clock": row["clock"],
                     "avg_metadata_bytes": row.get("metadata.avg_metadata_bytes", 0.0),
+                    "avg_sibling_set_metadata_bytes": row.get(
+                        "replica_state.avg_sibling_set_metadata_bytes",
+                        0.0,
+                    ),
                     "avg_recall": row.get("accuracy.avg_recall", 0.0),
                     "missed_conflict_rate": row.get("decision_quality.missed_conflict_rate", 0.0),
                     "stale_sibling_rate": row.get("decision_quality.stale_sibling_rate", 0.0),

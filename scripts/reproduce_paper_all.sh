@@ -24,7 +24,7 @@ Generated: $STAMP
 Included experiment sets:
 - Main final study: configs/final_study.yaml
 - Sensitivity studies: configs/sensitivity_client_count_32.yaml, configs/sensitivity_client_count_512.yaml, configs/sensitivity_rf3.yaml, configs/sensitivity_rf5.yaml
-- Extreme scenarios: configs/extreme_hotspot_churn.yaml, configs/extreme_sparse_replication.yaml
+- Extreme and DVV fanout scenarios: configs/dvv_sibling_fanout_study.yaml, configs/extreme_hotspot_churn.yaml, configs/extreme_sparse_replication.yaml
 
 Each subdirectory contains its own manifest, copied config, aggregate outputs, figures, and per-run artifacts.
 EOF
