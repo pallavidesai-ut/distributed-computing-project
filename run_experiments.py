@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import configargparse
@@ -584,9 +585,9 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "",
         "| Clock | Encoded state | Main strength | Main failure mode under churn |",
         "| --- | --- | --- | --- |",
-        "| VV | Exact per-object vector over bounded client actors | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct clients touching an object |",
-        "| DVV | Prefix summary plus explicit dots over replica actors | Full ancestry precision with metadata bounded by replication degree | More complex representation and implementation |",
-        "| ITC | Interval Tree Clock identity and event trees over dynamic client actors | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
+        "| VV | Exact per-object vector over the configured actor domain | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct actors touching an object |",
+        "| DVV | Prefix summary plus explicit dots over the same configured actor domain | Full ancestry precision with dotted context semantics | More complex representation and implementation |",
+        "| ITC | Interval Tree Clock identity and event trees over the configured actor domain | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
         "",
         "Related alternatives worth discussing in the paper, but not implemented here, are Bounded Version Vectors and HLC-style approximate causality if the study broadens beyond exact version ancestry.",
@@ -598,11 +599,12 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         f"- Seeds: {experiment_config['seeds']}",
         f"- Lease-DVV durations: {experiment_config['lease_durations']}",
         f"- Hot-key probability: {experiment_config['hot_key_probability']}",
+        f"- Actor domain: {experiment_config['actor_domain']}",
         f"- Client actor pool: {experiment_config['client_count']}",
         f"- Replication factor: {experiment_config['replication_factor']}",
         f"- Contention burst every {experiment_config['burst_interval']} time units with {experiment_config['burst_writers']} writers",
         "",
-        "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV uses a bounded client actor pool with carried per-key session context, and DVV/lease-DVV use replica dots. This keeps the main comparison on the same per-object causality semantics.",
+        "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV, DVV, and lease-DVV use the same configured actor domain (`physical`, `slot`, or `client`) so metadata differences are not caused by mixing actor identities.",
         "",
         "## Aggregated Findings",
         "",
@@ -640,9 +642,9 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         [
             "## Interpretation",
             "",
-            "- `vv` is the exact vanilla baseline. It shows the metadata cost of preserving full object ancestry with bounded client actors.",
-            "- `dvv` should match `vv` on correctness while reducing metadata by using replica-issued dots rather than tracking every client actor in the version vector.",
-            "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over dynamic client actors; compare its tree metadata against the exact VV and DVV baselines.",
+            "- `vv` is the exact vanilla baseline for the selected actor domain. It shows the metadata cost of preserving full object ancestry with a plain vector.",
+            "- `dvv` should match `vv` on correctness while representing writes as explicit dots plus compact causal context over the same actor domain.",
+            "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over the configured actor domain; compare its tree metadata against the exact VV and DVV baselines.",
             "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
             "",
             "## Outputs",
@@ -656,6 +658,64 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
     )
 
     (output_dir / "study_report.md").write_text("\n".join(lines))
+
+
+def run_experiment_case(spec: dict[str, object]) -> dict[str, object]:
+    """Execute one isolated profile/clock/seed case.
+
+    Kept as a top-level function so ProcessPoolExecutor can pickle it. The
+    parent process is still responsible for aggregate CSVs, plots, and reports.
+    """
+
+    profile = str(spec["profile"])
+    clock = str(spec["clock"])
+    variant = str(spec["variant"])
+    lease_duration = float(spec["lease_duration"])
+    seed = int(spec["seed"])
+    run_name = str(spec["run_name"])
+    run_dir = Path(str(spec["run_dir"]))
+    scenario_config = spec["scenario_config"]
+    experiment_config = spec["experiment_config"]
+    analysis_window = float(spec["analysis_window"])
+
+    metrics = run_scenario(
+        config=scenario_config,
+        clock_factory=make_clock_factory(clock, lease_duration),
+    )
+    run_config = {
+        **experiment_config,
+        **scenario_config_to_dict(scenario_config),
+        "clock": clock,
+        "clock_variant": variant,
+        "lease_duration": lease_duration if is_lease_clock(clock) else None,
+    }
+    save_run(
+        metrics,
+        output_dir=run_dir,
+        run_name=run_name,
+        config=run_config,
+        sim_time=scenario_config.sim_time,
+    )
+    analysis_dir = run_dir / f"{run_name}_analysis"
+    sections = analyze_run(
+        input_dir=run_dir,
+        run_name=run_name,
+        window=analysis_window,
+        output_dir=analysis_dir,
+    )
+    row = {
+        "_order": int(spec["order"]),
+        "profile": profile,
+        "clock": variant,
+        "clock_family": clock,
+        "lease_duration": lease_duration if is_lease_clock(clock) else "",
+        "seed": seed,
+        "run_name": run_name,
+        "run_dir": str(run_dir),
+        "analysis_dir": str(analysis_dir),
+    }
+    row.update(flatten_sections(sections))
+    return row
 
 
 def build_parser() -> configargparse.ArgParser:
@@ -678,7 +738,8 @@ def build_parser() -> configargparse.ArgParser:
     )
     parser.add("--analysis-window", type=float, default=12.0)
     parser.add("--write-pdf", action="store_true", help="Also write PDF copies of generated report plots.")
-    parser.add("--progress", action="store_true", help="Show a tqdm progress bar for each simulation run.")
+    parser.add("--jobs", type=int, default=1, help="Number of isolated experiment runs to execute in parallel.")
+    parser.add("--progress", action="store_true", help="Show an overall tqdm bar for completed experiment runs.")
     parser.add("--output-dir", default="output/experiments")
     parser.add("--experiment-name", default="per_object_clock_study")
     return parser
@@ -688,6 +749,8 @@ def main() -> None:
     global WRITE_PDF
     args = build_parser().parse_args()
     WRITE_PDF = args.write_pdf
+    if args.jobs < 1:
+        raise SystemExit("--jobs must be >= 1")
     lease_durations = [args.lease_duration] if args.fixed_lease_duration else (args.lease_durations or [args.lease_duration])
     experiment_dir = Path(args.output_dir) / args.experiment_name
     experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -702,13 +765,14 @@ def main() -> None:
         "fixed_lease_duration": args.fixed_lease_duration,
         "analysis_window": args.analysis_window,
         "write_pdf": args.write_pdf,
+        "jobs": args.jobs,
         "progress": args.progress,
         "output_dir": args.output_dir,
         "experiment_name": args.experiment_name,
     }
     (experiment_dir / "experiment_config.json").write_text(json.dumps(experiment_config, indent=2))
 
-    run_rows: list[dict[str, object]] = []
+    run_specs: list[dict[str, object]] = []
     for profile in args.profiles:
         for clock in args.clocks:
             clock_lease_durations = lease_durations if is_lease_clock(clock) else [lease_durations[0]]
@@ -716,54 +780,58 @@ def main() -> None:
                 variant = clock_variant(clock, lease_duration, len(clock_lease_durations))
                 for seed in args.seeds:
                     run_name = f"{profile}_{variant}_seed{seed}"
-                    run_dir = experiment_dir / run_name
-                    scenario_config = scenario_config_from_args(args, profile=profile, seed=seed)
-                    metrics = run_scenario(
-                        config=scenario_config,
-                        clock_factory=make_clock_factory(clock, lease_duration),
-                        progress=args.progress,
-                        progress_label=run_name,
+                    run_specs.append(
+                        {
+                            "order": len(run_specs),
+                            "profile": profile,
+                            "clock": clock,
+                            "variant": variant,
+                            "lease_duration": lease_duration,
+                            "seed": seed,
+                            "run_name": run_name,
+                            "run_dir": str(experiment_dir / run_name),
+                            "scenario_config": scenario_config_from_args(args, profile=profile, seed=seed),
+                            "experiment_config": experiment_config,
+                            "analysis_window": args.analysis_window,
+                        }
                     )
-                    run_config = {
-                        **experiment_config,
-                        **scenario_config_to_dict(scenario_config),
-                        "clock": clock,
-                        "clock_variant": variant,
-                        "lease_duration": lease_duration if is_lease_clock(clock) else None,
-                    }
-                    save_run(
-                        metrics,
-                        output_dir=run_dir,
-                        run_name=run_name,
-                        config=run_config,
-                        sim_time=args.sim_time,
-                    )
-                    analysis_dir = run_dir / f"{run_name}_analysis"
-                    sections = analyze_run(
-                        input_dir=run_dir,
-                        run_name=run_name,
-                        window=args.analysis_window,
-                        output_dir=analysis_dir,
-                    )
-                    row = {
-                        "profile": profile,
-                        "clock": variant,
-                        "clock_family": clock,
-                        "lease_duration": lease_duration if is_lease_clock(clock) else "",
-                        "seed": seed,
-                        "run_name": run_name,
-                        "run_dir": str(run_dir),
-                        "analysis_dir": str(analysis_dir),
-                    }
-                    row.update(flatten_sections(sections))
-                    run_rows.append(row)
 
+    progress_bar = None
+    if args.progress:
+        from tqdm.auto import tqdm
+
+        progress_bar = tqdm(total=len(run_specs), desc="experiment runs", unit="run")
+
+    run_rows: list[dict[str, object]] = []
+    try:
+        if args.jobs == 1:
+            for spec in run_specs:
+                run_rows.append(run_experiment_case(spec))
+                if progress_bar is not None:
+                    progress_bar.update(1)
+        else:
+            with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+                futures = [executor.submit(run_experiment_case, spec) for spec in run_specs]
+                for future in as_completed(futures):
+                    run_rows.append(future.result())
+                    if progress_bar is not None:
+                        progress_bar.update(1)
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+
+    run_rows.sort(key=lambda row: int(row.pop("_order")))
+    if args.progress:
+        print("Building aggregate CSVs, plots, time-series, and report...")
     write_csv(experiment_dir / "comparison_runs.csv", run_rows)
     aggregated_rows = aggregate_runs(run_rows)
     write_csv(experiment_dir / "comparison_by_clock.csv", aggregated_rows)
     make_comparison_plots(aggregated_rows, experiment_dir)
     write_time_series_report_plots(run_rows, experiment_dir)
     build_report(aggregated_rows, experiment_dir, experiment_config)
+    if args.progress:
+        print(f"Report: {experiment_dir / 'study_report.md'}")
+        print(f"Time series: {experiment_dir / 'time_series_report'}")
 
 
 if __name__ == "__main__":

@@ -152,8 +152,13 @@ class ITCReadContext:
 @dataclass
 class NodeClockState:
     node_id: str
+    clock_actor_id: str | None = None
     local_counters: dict[str, int] = field(default_factory=dict)
     leases: dict[str, dict[str, float]] = field(default_factory=lambda: defaultdict(dict))
+
+    @property
+    def actor_id(self) -> str:
+        return self.clock_actor_id or self.node_id
 
 
 @dataclass
@@ -353,7 +358,12 @@ class IntervalTreeClockModel(ClockModel):
 
 
 class DottedVersionVectorModel(ClockModel):
+    """Exact per-object DVV over the configured causal actor domain."""
+
     name = "dvv"
+
+    def __init__(self) -> None:
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
 
     def build_read_context(self, versions: list["VersionRecord"]) -> CausalContext:
         return union_contexts(version.stamp.represented_context() for version in versions)
@@ -368,11 +378,11 @@ class DottedVersionVectorModel(ClockModel):
     ) -> BaseStamp:
         compacted = compact_context(read_context.prefix, set(read_context.dots))
         next_counter = max(
-            state.local_counters.get(key, 0),
-            compacted.max_counter(state.node_id),
+            self.actor_counters[actor_id].get(key, 0),
+            compacted.max_counter(actor_id),
         ) + 1
-        state.local_counters[key] = next_counter
-        dot = Dot(state.node_id, next_counter)
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
         exceptions = set(compacted.dots)
         exceptions.discard(dot)
         return DVVStamp(
@@ -384,17 +394,9 @@ class DottedVersionVectorModel(ClockModel):
 
 
 class ClientDottedVersionVectorModel(DottedVersionVectorModel):
-    """Exact DVV over the same client actor domain used by VV and ITC.
-
-    The main `dvv` model intentionally uses replica-issued dots for the
-    replicated-store track. This variant exists for an apples-to-apples
-    dynamic-client track where VV, DVV, and ITC all see the same actor space.
-    """
+    """Exact DVV over the same client actor domain used by VV and ITC."""
 
     name = "dvv_client"
-
-    def __init__(self) -> None:
-        self.client_counters: dict[str, dict[str, int]] = defaultdict(dict)
 
     def issue_stamp(
         self,
@@ -406,10 +408,10 @@ class ClientDottedVersionVectorModel(DottedVersionVectorModel):
     ) -> BaseStamp:
         compacted = compact_context(read_context.prefix, set(read_context.dots))
         next_counter = max(
-            self.client_counters[actor_id].get(key, 0),
+            self.actor_counters[actor_id].get(key, 0),
             compacted.max_counter(actor_id),
         ) + 1
-        self.client_counters[actor_id][key] = next_counter
+        self.actor_counters[actor_id][key] = next_counter
         dot = Dot(actor_id, next_counter)
         exceptions = set(compacted.dots)
         exceptions.discard(dot)
@@ -478,6 +480,7 @@ class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
 
     def __init__(self, lease_duration: float) -> None:
         self.lease_duration = lease_duration
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
 
     def observe_stamp(
         self,
@@ -502,15 +505,15 @@ class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
         expiries = state.leases[key]
         pruned = prune_context(
             read_context,
-            actor_is_live=lambda actor: actor == state.node_id or expiries.get(actor, float("-inf")) > now,
+            actor_is_live=lambda actor: actor == actor_id or expiries.get(actor, float("-inf")) > now,
         )
         live_context = pruned.context
         next_counter = max(
-            state.local_counters.get(key, 0),
-            live_context.max_counter(state.node_id),
+            self.actor_counters[actor_id].get(key, 0),
+            live_context.max_counter(actor_id),
         ) + 1
-        state.local_counters[key] = next_counter
-        dot = Dot(state.node_id, next_counter)
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
         stamp = DVVStamp(
             summary=dict(live_context.prefix),
             exceptions=set(live_context.dots),
@@ -535,6 +538,7 @@ class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
 
     def __init__(self, lease_duration: float) -> None:
         self.lease_duration = lease_duration
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
         self.active_actors: set[str] = set()
         self.departure_expiry: dict[str, float] = {}
 
@@ -563,15 +567,15 @@ class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
     ) -> BaseStamp:
         pruned = prune_context(
             read_context,
-            actor_is_live=lambda actor: self._actor_is_live(actor, state.node_id, now),
+            actor_is_live=lambda actor: self._actor_is_live(actor, actor_id, now),
         )
         live_context = pruned.context
         next_counter = max(
-            state.local_counters.get(key, 0),
-            live_context.max_counter(state.node_id),
+            self.actor_counters[actor_id].get(key, 0),
+            live_context.max_counter(actor_id),
         ) + 1
-        state.local_counters[key] = next_counter
-        dot = Dot(state.node_id, next_counter)
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
         return DVVStamp(
             summary=dict(live_context.prefix),
             exceptions=set(live_context.dots),

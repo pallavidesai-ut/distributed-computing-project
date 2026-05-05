@@ -85,12 +85,14 @@ class Cluster:
         min_lat: float | None = None,
         max_lat: float | None = None,
         sample_interval: float | None = None,
+        actor_domain: str | None = None,
         workload: WorkloadConfig | None = None,
     ) -> None:
         if config is None:
             workload = workload or WorkloadConfig()
             config = ScenarioConfig(
                 profile=profile or ScenarioConfig.profile,
+                actor_domain=actor_domain or ScenarioConfig.actor_domain,
                 cluster=ClusterConfig(
                     initial_size=initial_size if initial_size is not None else ClusterConfig.initial_size,
                     max_nodes=max_nodes if max_nodes is not None else ClusterConfig.max_nodes,
@@ -108,6 +110,7 @@ class Cluster:
         self.metrics = metrics
         self.clock_model = clock_model
         self.profile = CHURN_PROFILES[config.profile]
+        self.actor_domain = config.actor_domain
         self.max_nodes = config.cluster.max_nodes
         self.min_nodes = config.cluster.min_nodes
         self.replication_factor = config.cluster.replication_factor
@@ -115,10 +118,14 @@ class Cluster:
         self.sample_interval = config.cluster.sample_interval
         self.workload = config.workload
         self.nodes: list[Node] = []
+        self.clock_actor_slots = [f"r{index:04d}" for index in range(1, self.max_nodes + 1)]
         self.node_counter = 0
         self.version_counter = 0
         self.clients = [f"c{index:04d}" for index in range(1, self.workload.client_count + 1)]
         self.client_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self.clock_actor_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
             lambda: defaultdict(list)
         )
 
@@ -130,6 +137,27 @@ class Cluster:
 
     def active_node_ids(self) -> set[str]:
         return {node.id for node in self.active_nodes()}
+
+    def active_slot_actor_ids(self) -> set[str]:
+        return {node.state.actor_id for node in self.active_nodes()}
+
+    def active_clock_actor_ids(self) -> set[str]:
+        if self.actor_domain == "physical":
+            return self.active_node_ids()
+        if self.actor_domain == "slot":
+            return self.active_slot_actor_ids()
+        if self.actor_domain == "client":
+            return set(self.clients)
+        raise ValueError(f"Unknown actor domain: {self.actor_domain}")
+
+    def clock_actor_for_write(self, *, client_id: str, coordinator: Node) -> str:
+        if self.actor_domain == "physical":
+            return coordinator.id
+        if self.actor_domain == "slot":
+            return coordinator.state.actor_id
+        if self.actor_domain == "client":
+            return client_id
+        raise ValueError(f"Unknown actor domain: {self.actor_domain}")
 
     def active_count(self) -> int:
         return len(self.active_nodes())
@@ -216,14 +244,19 @@ class Cluster:
     ) -> None:
         update_active_actors = getattr(self.clock_model, "update_active_actors", None)
         if update_active_actors is not None:
-            update_active_actors(self.active_node_ids(), self.env.now)
+            update_active_actors(self.active_clock_actor_ids(), self.env.now)
+        clock_actor_id = self.clock_actor_for_write(client_id=actor_id, coordinator=coordinator)
+        by_id = {version.version_id: version for version in context_versions}
+        for version in self.clock_actor_versions[clock_actor_id][key]:
+            by_id.setdefault(version.version_id, version)
+        context_versions = list(by_id.values())
         read_context = self.clock_model.build_read_context(context_versions)
         stamp = self.clock_model.issue_stamp(
             coordinator.state,
             key,
             read_context,
             self.env.now,
-            actor_id,
+            clock_actor_id,
         )
         true_history: set[EventId] = {EventId.from_dot(key, stamp.dot)}
         for version in context_versions:
@@ -241,6 +274,7 @@ class Cluster:
 
         coordinator.apply_version(version)
         self.remember_client_version(actor_id, version)
+        self.clock_actor_versions[clock_actor_id][version.key] = [version]
         self._record_accuracy(version)
         represented_context = version.stamp.represented_context()
         targets = self.replication_targets(coordinator)
@@ -248,7 +282,7 @@ class Cluster:
             t=self.env.now,
             version=version,
             node_id=coordinator.id,
-            actor_id=actor_id,
+            actor_id=clock_actor_id,
             metadata_bytes=version.stamp.metadata_bytes(),
             metadata_components=version.stamp.metadata_component_count(),
             actor_entries=len(version.stamp.actor_entries()),
@@ -377,11 +411,19 @@ class Cluster:
 
         self.env.schedule(interval, burst)
 
+    def _allocate_clock_actor_id(self) -> str:
+        active_actors = self.active_slot_actor_ids()
+        for actor_id in self.clock_actor_slots:
+            if actor_id not in active_actors:
+                return actor_id
+        return f"r{len(self.clock_actor_slots) + 1:04d}"
+
     def _add_node(self) -> None:
         self.node_counter += 1
         node = Node(
             env=self.env,
             node_id=f"n{self.node_counter:04d}",
+            clock_actor_id=self._allocate_clock_actor_id(),
             cluster=self,
             clock_model=self.clock_model,
             metrics=self.metrics,
@@ -441,7 +483,7 @@ class Cluster:
     def _schedule_snapshot(self) -> None:
         def snapshot() -> None:
             active = self.active_nodes()
-            active_ids = self.active_node_ids()
+            active_clock_actors = self.active_clock_actor_ids()
             if not active:
                 self.metrics.record_snapshot(
                     t=self.env.now,
@@ -468,8 +510,8 @@ class Cluster:
                             metadata_bytes.append(version.stamp.metadata_bytes())
                             actor_set = version.stamp.actor_entries()
                             actor_entries.append(len(actor_set))
-                            replica_actor_set = {actor for actor in actor_set if actor.startswith("n")}
-                            stale_count = len(replica_actor_set - active_ids)
+                            replica_actor_set = {actor for actor in actor_set if not actor.startswith("c")}
+                            stale_count = len(replica_actor_set - active_clock_actors)
                             stale_actor_fractions.append(
                                 stale_count / len(replica_actor_set) if replica_actor_set else 0.0
                             )

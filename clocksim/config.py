@@ -56,11 +56,15 @@ class NetworkConfig:
     max_lat: float = 5.0
 
 
+ACTOR_DOMAINS = ("physical", "slot", "client")
+
+
 @dataclass(frozen=True)
 class ScenarioConfig:
     profile: str = "sustained"
     sim_time: float = 240.0
     seed: int = 42
+    actor_domain: str = "physical"
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     workload: WorkloadConfig = field(default_factory=WorkloadConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -86,6 +90,7 @@ SCENARIO_ARG_NAMES = (
     "client_count",
     "replication_factor",
     "sample_interval",
+    "actor_domain",
 )
 
 
@@ -124,6 +129,12 @@ def add_scenario_args(
     parser.add_argument("--client-count", type=int, default=WorkloadConfig.client_count)
     parser.add_argument("--replication-factor", type=int, default=ClusterConfig.replication_factor)
     parser.add_argument("--sample-interval", type=float, default=ClusterConfig.sample_interval)
+    parser.add_argument(
+        "--actor-domain",
+        choices=ACTOR_DOMAINS,
+        default=ScenarioConfig.actor_domain,
+        help="Causal actor identity used by clocks: physical node, stable slot/vnode, or client/session.",
+    )
 
 
 def scenario_options_from_args(args: Any) -> dict[str, Any]:
@@ -151,10 +162,14 @@ def scenario_config_from_kwargs(**kwargs: Any) -> ScenarioConfig:
     profile = str(kwargs.pop("profile", ScenarioConfig.profile))
     sim_time = float(kwargs.pop("sim_time", ScenarioConfig.sim_time))
     seed = int(kwargs.pop("seed", ScenarioConfig.seed))
+    actor_domain = str(kwargs.pop("actor_domain", ScenarioConfig.actor_domain))
+    if actor_domain not in ACTOR_DOMAINS:
+        raise ValueError(f"Unknown actor_domain {actor_domain!r}; expected one of {ACTOR_DOMAINS}")
     return ScenarioConfig(
         profile=profile,
         sim_time=sim_time,
         seed=seed,
+        actor_domain=actor_domain,
         cluster=ClusterConfig(
             initial_size=int(kwargs.pop("initial_size", ClusterConfig.initial_size)),
             max_nodes=int(kwargs.pop("max_nodes", ClusterConfig.max_nodes)),
@@ -194,6 +209,7 @@ def scenario_config_to_dict(config: ScenarioConfig) -> dict[str, Any]:
         "profile": config.profile,
         "sim_time": config.sim_time,
         "seed": config.seed,
+        "actor_domain": config.actor_domain,
         "initial_size": config.cluster.initial_size,
         "write_interval": config.workload.write_interval,
         "client_think_time": config.workload.client_think_time,

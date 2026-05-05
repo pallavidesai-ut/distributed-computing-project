@@ -29,7 +29,20 @@ def test_vv_and_dvv_preserve_read_ancestry_in_same_object_chain() -> None:
 
 
 
-def test_client_dvv_uses_client_actor_domain_for_direct_itc_comparison() -> None:
+def test_dvv_uses_configured_actor_identity_supplied_by_simulator() -> None:
+    model = DottedVersionVectorModel()
+    state = model.make_state("physical-node-1")
+
+    first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="configured-actor")
+    second = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="configured-actor")
+
+    assert first.dot.actor == "configured-actor"
+    assert second.dot.actor == "configured-actor"
+    assert first.dot.counter == 1
+    assert second.dot.counter == 2
+
+
+def test_client_dvv_uses_same_client_actor_domain_as_vv() -> None:
     model = ClientDottedVersionVectorModel()
     state = model.make_state("n1")
     first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-a")

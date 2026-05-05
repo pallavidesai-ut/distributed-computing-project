@@ -96,4 +96,9 @@ cp "$CONFIG_PATH" "$OUTPUT_PATH/source_config.yaml"
 if [[ "${SKIP_ORGANIZE:-0}" != "1" ]]; then
   "$PYTHON" scripts/organize_experiment.py "$OUTPUT_PATH"
   echo "  organized: $OUTPUT_PATH"
+  echo "  report: $OUTPUT_PATH/study_report.md"
+  echo "  time series: $OUTPUT_PATH/time_series"
+else
+  echo "  report: $OUTPUT_PATH/study_report.md"
+  echo "  time series: $OUTPUT_PATH/time_series_report"
 fi
