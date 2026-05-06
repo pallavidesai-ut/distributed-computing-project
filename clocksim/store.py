@@ -58,6 +58,7 @@ class Node:
         *,
         env: Environment,
         node_id: str,
+        clock_actor_id: str | None = None,
         cluster: "Cluster",
         clock_model: ClockModel,
         metrics: MetricsCollector,
@@ -68,6 +69,7 @@ class Node:
         self.clock_model = clock_model
         self.metrics = metrics
         self.state = clock_model.make_state(node_id)
+        self.state.clock_actor_id = clock_actor_id
         self.kv: dict[str, list[VersionRecord]] = {}
         self.active = True
 

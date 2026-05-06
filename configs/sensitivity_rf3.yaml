@@ -1,8 +1,10 @@
 # Replication-factor sensitivity: lower fanout.
 # Purpose: test whether smaller replica coverage changes DVV context width and sibling pressure.
 
-clocks: [vv, dvv, lease_dvv, vv_vnode]
+clocks: [vv, dvv, lease_dvv]
 profiles: [stable, sustained]
+actor-domain: physical
+
 seeds: [1, 2, 3]
 
 sim-time: 240.0

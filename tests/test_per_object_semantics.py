@@ -40,6 +40,7 @@ def make_cluster() -> Cluster:
         min_lat=0.0,
         max_lat=0.0,
         sample_interval=1000.0,
+        actor_domain="client",
         workload=workload,
     )
 

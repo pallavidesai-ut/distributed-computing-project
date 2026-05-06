@@ -16,11 +16,12 @@ from __future__ import annotations
 import heapq
 import json
 import random
+import bisect
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import CHURN_PROFILES, ClusterConfig, NetworkConfig, ScenarioConfig, WorkloadConfig, scenario_config_from_kwargs
 from .metrics import MetricsCollector
 
 class Environment:
@@ -35,45 +36,41 @@ class Environment:
         heapq.heappush(self._queue, (self.now + delay, self._seq, callback))
         self._seq += 1
 
-    def run(self, until: float) -> None:
-        while self._queue:
-            t, _, callback = self._queue[0]
-            if t > until:
-                break
-            heapq.heappop(self._queue)
-            self.now = t
-            callback()
+    def run(self, until: float, *, progress: bool = False, desc: str | None = None) -> None:
+        progress_bar = None
+        if progress:
+            try:
+                from tqdm.auto import tqdm
+            except ImportError as exc:  # pragma: no cover - dependency/configuration guard
+                raise RuntimeError("Progress display requires tqdm. Install project dependencies or omit --progress.") from exc
+            progress_bar = tqdm(
+                total=until,
+                initial=min(self.now, until),
+                desc=desc or "simulation",
+                unit="sim-time",
+            )
+
+        try:
+            while self._queue:
+                t, _, callback = self._queue[0]
+                if t > until:
+                    if progress_bar is not None:
+                        progress_bar.update(max(0.0, until - progress_bar.n))
+                    break
+                heapq.heappop(self._queue)
+                self.now = t
+                if progress_bar is not None:
+                    progress_bar.update(max(0.0, min(self.now, until) - progress_bar.n))
+                callback()
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
 
 from .clocks import ClockModel
 from .context import Dot, EventId
+from .shared_metadata import sibling_set_encoding
 from .store import Message, Node, VersionRecord
-
-CHURN_PROFILES = {
-    "stable": {"join_rate": 0.0, "leave_rate": 0.0, "burst_size": 0, "burst_interval": None},
-    "low": {"join_rate": 0.01, "leave_rate": 0.01, "burst_size": 0, "burst_interval": None},
-    "sustained": {"join_rate": 0.035, "leave_rate": 0.035, "burst_size": 0, "burst_interval": None},
-    "burst": {"join_rate": 0.01, "leave_rate": 0.01, "burst_size": 6, "burst_interval": 45.0},
-}
-
-
-@dataclass
-class WorkloadConfig:
-    key_count: int
-    hot_key_probability: float
-    client_count: int
-    write_interval: float
-    client_think_time: float
-    merge_probability: float
-    burst_interval: float
-    burst_writers: int
-    burst_spread: float
-    merge_delay: float
-    same_coordinator_probability: float
-    replication_factor: int
-
-
-
 
 class Cluster:
     def __init__(
@@ -82,34 +79,60 @@ class Cluster:
         env: Environment,
         metrics: MetricsCollector,
         clock_model: ClockModel,
-        profile: str,
-        initial_size: int,
-        max_nodes: int,
-        min_nodes: int,
-        min_lat: float,
-        max_lat: float,
-        sample_interval: float,
-        workload: WorkloadConfig,
+        config: ScenarioConfig | None = None,
+        profile: str | None = None,
+        initial_size: int | None = None,
+        max_nodes: int | None = None,
+        min_nodes: int | None = None,
+        min_lat: float | None = None,
+        max_lat: float | None = None,
+        sample_interval: float | None = None,
+        actor_domain: str | None = None,
+        workload: WorkloadConfig | None = None,
     ) -> None:
+        if config is None:
+            workload = workload or WorkloadConfig()
+            config = ScenarioConfig(
+                profile=profile or ScenarioConfig.profile,
+                actor_domain=actor_domain or ScenarioConfig.actor_domain,
+                cluster=ClusterConfig(
+                    initial_size=initial_size if initial_size is not None else ClusterConfig.initial_size,
+                    max_nodes=max_nodes if max_nodes is not None else ClusterConfig.max_nodes,
+                    min_nodes=min_nodes if min_nodes is not None else ClusterConfig.min_nodes,
+                    replication_factor=workload.replication_factor,
+                    sample_interval=sample_interval if sample_interval is not None else ClusterConfig.sample_interval,
+                ),
+                workload=workload,
+                network=NetworkConfig(
+                    min_lat=min_lat if min_lat is not None else NetworkConfig.min_lat,
+                    max_lat=max_lat if max_lat is not None else NetworkConfig.max_lat,
+                ),
+            )
         self.env = env
         self.metrics = metrics
         self.clock_model = clock_model
-        self.profile = CHURN_PROFILES[profile]
-        self.max_nodes = max_nodes
-        self.min_nodes = min_nodes
-        self.min_lat = min_lat
-        self.max_lat = max_lat
-        self.sample_interval = sample_interval
-        self.workload = workload
+        self.profile = CHURN_PROFILES[config.profile]
+        self.actor_domain = config.actor_domain
+        self.max_nodes = config.cluster.max_nodes
+        self.min_nodes = config.cluster.min_nodes
+        self.replication_factor = config.cluster.replication_factor
+        self.network = config.network
+        self.sample_interval = config.cluster.sample_interval
+        self.workload = config.workload
         self.nodes: list[Node] = []
+        self.clock_actor_slots = [f"r{index:04d}" for index in range(1, self.max_nodes + 1)]
         self.node_counter = 0
         self.version_counter = 0
-        self.clients = [f"c{index:04d}" for index in range(1, workload.client_count + 1)]
+        self.clients = [f"c{index:04d}" for index in range(1, self.workload.client_count + 1)]
         self.client_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
             lambda: defaultdict(list)
         )
+        self.clock_actor_versions: dict[str, dict[str, list[VersionRecord]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self._zipf_cdf = self._build_zipf_cdf()
 
-        for _ in range(initial_size):
+        for _ in range(config.cluster.initial_size):
             self._add_node()
 
     def active_nodes(self) -> list[Node]:
@@ -117,6 +140,27 @@ class Cluster:
 
     def active_node_ids(self) -> set[str]:
         return {node.id for node in self.active_nodes()}
+
+    def active_slot_actor_ids(self) -> set[str]:
+        return {node.state.actor_id for node in self.active_nodes()}
+
+    def active_clock_actor_ids(self) -> set[str]:
+        if self.actor_domain == "physical":
+            return self.active_node_ids()
+        if self.actor_domain == "slot":
+            return self.active_slot_actor_ids()
+        if self.actor_domain == "client":
+            return set(self.clients)
+        raise ValueError(f"Unknown actor domain: {self.actor_domain}")
+
+    def clock_actor_for_write(self, *, client_id: str, coordinator: Node) -> str:
+        if self.actor_domain == "physical":
+            return coordinator.id
+        if self.actor_domain == "slot":
+            return coordinator.state.actor_id
+        if self.actor_domain == "client":
+            return client_id
+        raise ValueError(f"Unknown actor domain: {self.actor_domain}")
 
     def active_count(self) -> int:
         return len(self.active_nodes())
@@ -126,9 +170,41 @@ class Cluster:
         return random.choice(active) if active else None
 
     def choose_key(self) -> str:
-        if self.workload.key_count <= 1 or random.random() < self.workload.hot_key_probability:
+        if self.workload.key_count <= 1:
+            return "k0"
+        if self.workload.key_distribution == "zipf":
+            return self._choose_key_zipf()
+        if random.random() < self.workload.hot_key_probability:
             return "k0"
         return f"k{random.randint(1, self.workload.key_count - 1)}"
+
+    def _build_zipf_cdf(self) -> list[float]:
+        if self.workload.key_distribution != "zipf":
+            return []
+        if self.workload.key_count <= 0:
+            return []
+        if self.workload.zipf_skew <= 0.0:
+            return []
+        weights = [1.0 / (float(rank) ** self.workload.zipf_skew) for rank in range(1, self.workload.key_count + 1)]
+        total = sum(weights)
+        if total <= 0.0:
+            return []
+        cumulative = []
+        current = 0.0
+        for weight in weights:
+            current += weight / total
+            cumulative.append(current)
+        cumulative[-1] = 1.0
+        return cumulative
+
+    def _choose_key_zipf(self) -> str:
+        if self.workload.key_distribution != "zipf":
+            raise RuntimeError("Zipf key distribution is disabled.")
+        cdf = self._zipf_cdf
+        if not cdf:
+            return f"k{random.randint(0, self.workload.key_count - 1)}"
+        rank = bisect.bisect_left(cdf, random.random())
+        return f"k{min(rank, self.workload.key_count - 1)}"
 
     def choose_client(self) -> str:
         return random.choice(self.clients)
@@ -160,7 +236,7 @@ class Cluster:
 
     def replication_targets(self, coordinator: Node) -> list[Node]:
         peers = [node for node in self.active_nodes() if node.id != coordinator.id]
-        max_targets = max(self.workload.replication_factor - 1, 0)
+        max_targets = max(self.replication_factor - 1, 0)
         if max_targets <= 0 or not peers:
             return []
         if max_targets >= len(peers):
@@ -200,17 +276,23 @@ class Cluster:
         context_versions: list[VersionRecord],
         phase: str,
         actor_id: str,
+        request_start_time: float | None = None,
     ) -> None:
         update_active_actors = getattr(self.clock_model, "update_active_actors", None)
         if update_active_actors is not None:
-            update_active_actors(self.active_node_ids(), self.env.now)
+            update_active_actors(self.active_clock_actor_ids(), self.env.now)
+        clock_actor_id = self.clock_actor_for_write(client_id=actor_id, coordinator=coordinator)
+        by_id = {version.version_id: version for version in context_versions}
+        for version in self.clock_actor_versions[clock_actor_id][key]:
+            by_id.setdefault(version.version_id, version)
+        context_versions = list(by_id.values())
         read_context = self.clock_model.build_read_context(context_versions)
         stamp = self.clock_model.issue_stamp(
             coordinator.state,
             key,
             read_context,
             self.env.now,
-            actor_id,
+            clock_actor_id,
         )
         true_history: set[EventId] = {EventId.from_dot(key, stamp.dot)}
         for version in context_versions:
@@ -228,6 +310,7 @@ class Cluster:
 
         coordinator.apply_version(version)
         self.remember_client_version(actor_id, version)
+        self.clock_actor_versions[clock_actor_id][version.key] = [version]
         self._record_accuracy(version)
         represented_context = version.stamp.represented_context()
         targets = self.replication_targets(coordinator)
@@ -235,7 +318,7 @@ class Cluster:
             t=self.env.now,
             version=version,
             node_id=coordinator.id,
-            actor_id=actor_id,
+            actor_id=clock_actor_id,
             metadata_bytes=version.stamp.metadata_bytes(),
             metadata_components=version.stamp.metadata_component_count(),
             actor_entries=len(version.stamp.actor_entries()),
@@ -244,6 +327,18 @@ class Cluster:
             is_hot_key=(key == "k0"),
             target_replicas=len(targets) + 1,
         )
+        if request_start_time is not None:
+            self.metrics.record_client_write_latency(
+                t=self.env.now,
+                version_id=version.version_id,
+                key=key,
+                actor_id=actor_id,
+                coordinator=coordinator.id,
+                start_time=request_start_time,
+                end_time=self.env.now,
+                target_replicas=len(targets) + 1,
+                phase=phase,
+            )
 
         for target in targets:
             message = Message(
@@ -253,7 +348,7 @@ class Cluster:
                 version=version,
                 sent_at=self.env.now,
             )
-            delay = random.uniform(self.min_lat, self.max_lat)
+            delay = random.uniform(self.network.min_lat, self.network.max_lat)
             self.env.schedule(delay, self._make_delivery(message))
 
     def _make_delivery(self, message: Message) -> Callable[[], None]:
@@ -283,6 +378,7 @@ class Cluster:
             if coordinator is not None:
                 key = self.choose_key()
                 client_id = self.allocate_write_actor()
+                request_start_time = self.env.now
                 target_node = coordinator
 
                 def commit() -> None:
@@ -305,6 +401,7 @@ class Cluster:
                         context_versions=read_versions,
                         phase=phase,
                         actor_id=client_id,
+                        request_start_time=request_start_time,
                     )
 
                 think = random.expovariate(1.0 / self.workload.client_think_time)
@@ -324,13 +421,18 @@ class Cluster:
                 writers = max(2, self.workload.burst_writers)
                 for _ in range(writers):
                     coordinator = anchor
+                    request_start_time = self.env.now
                     client_id = self.allocate_write_actor()
                     if random.random() > self.workload.same_coordinator_probability:
                         alternative = self.choose_node()
                         if alternative is not None:
                             coordinator = alternative
 
-                    def burst_write(target: Node = coordinator, writer_id: str = client_id) -> None:
+                    def burst_write(
+                        target: Node = coordinator,
+                        writer_id: str = client_id,
+                        request_started: float = request_start_time,
+                    ) -> None:
                         if not target.active:
                             target = self.choose_node()
                             if target is None:
@@ -341,6 +443,7 @@ class Cluster:
                             context_versions=self.context_for_client(writer_id, key, shared_context),
                             phase="burst",
                             actor_id=writer_id,
+                            request_start_time=request_started,
                         )
 
                     self.env.schedule(random.uniform(0.0, self.workload.burst_spread), burst_write)
@@ -350,12 +453,14 @@ class Cluster:
                     if target is None:
                         return
                     actor_id = self.allocate_write_actor()
+                    request_start_time = self.env.now
                     self.execute_write(
                         key=key,
                         coordinator=target,
                         context_versions=self.context_for_client(actor_id, key, target.read(key)),
                         phase="burst_merge",
                         actor_id=actor_id,
+                        request_start_time=request_start_time,
                     )
 
                 self.env.schedule(self.workload.merge_delay, merge_write)
@@ -364,11 +469,19 @@ class Cluster:
 
         self.env.schedule(interval, burst)
 
+    def _allocate_clock_actor_id(self) -> str:
+        active_actors = self.active_slot_actor_ids()
+        for actor_id in self.clock_actor_slots:
+            if actor_id not in active_actors:
+                return actor_id
+        return f"r{len(self.clock_actor_slots) + 1:04d}"
+
     def _add_node(self) -> None:
         self.node_counter += 1
         node = Node(
             env=self.env,
             node_id=f"n{self.node_counter:04d}",
+            clock_actor_id=self._allocate_clock_actor_id(),
             cluster=self,
             clock_model=self.clock_model,
             metrics=self.metrics,
@@ -388,8 +501,8 @@ class Cluster:
         self.metrics.record_leave(victim.id, self.active_count(), self.env.now)
 
     def _schedule_churn_event(self) -> None:
-        join_rate = self.profile["join_rate"]
-        leave_rate = self.profile["leave_rate"]
+        join_rate = self.profile.join_rate
+        leave_rate = self.profile.leave_rate
         total_rate = join_rate + leave_rate
         if total_rate <= 0:
             return
@@ -406,8 +519,8 @@ class Cluster:
         self.env.schedule(delay, churn)
 
     def _schedule_burst_churn(self) -> None:
-        burst_size = self.profile["burst_size"]
-        interval = self.profile["burst_interval"]
+        burst_size = self.profile.burst_size
+        interval = self.profile.burst_interval
         if burst_size <= 0 or interval is None:
             return
 
@@ -428,7 +541,7 @@ class Cluster:
     def _schedule_snapshot(self) -> None:
         def snapshot() -> None:
             active = self.active_nodes()
-            active_ids = self.active_node_ids()
+            active_clock_actors = self.active_clock_actor_ids()
             if not active:
                 self.metrics.record_snapshot(
                     t=self.env.now,
@@ -438,6 +551,8 @@ class Cluster:
                     max_hot_key_siblings=0,
                     avg_metadata_bytes=0.0,
                     avg_actor_entries=0.0,
+                    avg_sibling_set_metadata_bytes=0.0,
+                    avg_sibling_set_metadata_components=0.0,
                     avg_stale_actor_fraction=0.0,
                 )
             else:
@@ -445,18 +560,23 @@ class Cluster:
                 hot_sibling_counts: list[int] = []
                 metadata_bytes: list[int] = []
                 actor_entries: list[int] = []
+                sibling_set_metadata_bytes: list[int] = []
+                sibling_set_metadata_components: list[int] = []
                 stale_actor_fractions: list[float] = []
                 for node in active:
                     key_versions = sum(len(versions) for versions in node.kv.values())
                     version_counts.append(key_versions / max(len(node.kv), 1) if node.kv else 0.0)
                     hot_sibling_counts.append(len(node.kv.get("k0", [])))
                     for versions in node.kv.values():
+                        encoding = sibling_set_encoding([version.stamp for version in versions])
+                        sibling_set_metadata_bytes.append(encoding.metadata_bytes())
+                        sibling_set_metadata_components.append(encoding.metadata_component_count())
                         for version in versions:
                             metadata_bytes.append(version.stamp.metadata_bytes())
                             actor_set = version.stamp.actor_entries()
                             actor_entries.append(len(actor_set))
-                            replica_actor_set = {actor for actor in actor_set if actor.startswith("n")}
-                            stale_count = len(replica_actor_set - active_ids)
+                            replica_actor_set = {actor for actor in actor_set if not actor.startswith("c")}
+                            stale_count = len(replica_actor_set - active_clock_actors)
                             stale_actor_fractions.append(
                                 stale_count / len(replica_actor_set) if replica_actor_set else 0.0
                             )
@@ -468,6 +588,16 @@ class Cluster:
                     max_hot_key_siblings=max(hot_sibling_counts, default=0),
                     avg_metadata_bytes=sum(metadata_bytes) / len(metadata_bytes) if metadata_bytes else 0.0,
                     avg_actor_entries=sum(actor_entries) / len(actor_entries) if actor_entries else 0.0,
+                    avg_sibling_set_metadata_bytes=(
+                        sum(sibling_set_metadata_bytes) / len(sibling_set_metadata_bytes)
+                    )
+                    if sibling_set_metadata_bytes
+                    else 0.0,
+                    avg_sibling_set_metadata_components=(
+                        sum(sibling_set_metadata_components) / len(sibling_set_metadata_components)
+                    )
+                    if sibling_set_metadata_components
+                    else 0.0,
                     avg_stale_actor_fraction=sum(stale_actor_fractions) / len(stale_actor_fractions)
                     if stale_actor_fractions
                     else 0.0,
@@ -486,61 +616,31 @@ class Cluster:
 
 def run_scenario(
     *,
-    profile: str,
     clock_factory: Callable[[], ClockModel],
-    sim_time: float,
-    seed: int,
-    initial_size: int,
-    write_interval: float,
-    max_nodes: int,
-    min_nodes: int,
-    min_lat: float,
-    max_lat: float,
-    key_count: int,
-    hot_key_probability: float,
-    client_count: int,
-    replication_factor: int,
-    sample_interval: float,
-    client_think_time: float = 4.0,
-    merge_probability: float = 0.35,
-    burst_interval: float = 18.0,
-    burst_writers: int = 4,
-    burst_spread: float = 2.0,
-    merge_delay: float = 10.0,
-    same_coordinator_probability: float = 0.75,
+    config: ScenarioConfig | None = None,
+    progress: bool = False,
+    progress_label: str | None = None,
+    **legacy_kwargs: Any,
 ) -> MetricsCollector:
-    random.seed(seed)
+    """Run one scenario.
+
+    New code should pass ``config``. ``legacy_kwargs`` keeps older tests and
+    scripts working while centralizing the many scenario knobs in dataclasses.
+    """
+
+    if config is None:
+        config = scenario_config_from_kwargs(**legacy_kwargs)
+    random.seed(config.seed)
     env = Environment()
     metrics = MetricsCollector()
-    workload = WorkloadConfig(
-        key_count=key_count,
-        hot_key_probability=hot_key_probability,
-        client_count=client_count,
-        write_interval=write_interval,
-        client_think_time=client_think_time,
-        merge_probability=merge_probability,
-        burst_interval=burst_interval,
-        burst_writers=burst_writers,
-        burst_spread=burst_spread,
-        merge_delay=merge_delay,
-        same_coordinator_probability=same_coordinator_probability,
-        replication_factor=replication_factor,
-    )
     cluster = Cluster(
         env=env,
         metrics=metrics,
         clock_model=clock_factory(),
-        profile=profile,
-        initial_size=initial_size,
-        max_nodes=max_nodes,
-        min_nodes=min_nodes,
-        min_lat=min_lat,
-        max_lat=max_lat,
-        sample_interval=sample_interval,
-        workload=workload,
+        config=config,
     )
     cluster.start()
-    env.run(until=sim_time)
+    env.run(until=config.sim_time, progress=progress, desc=progress_label)
     return metrics
 
 
@@ -558,6 +658,3 @@ def save_run(
     (output_dir / f"{run_name}_config.json").write_text(json.dumps(config, indent=2))
     (output_dir / f"{run_name}_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
-
-
-

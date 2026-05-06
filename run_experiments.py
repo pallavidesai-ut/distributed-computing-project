@@ -4,9 +4,11 @@ import csv
 import json
 import math
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import configargparse
+from urllib.parse import quote as url_quote
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
@@ -18,9 +20,13 @@ WRITE_PDF = False
 from analyze_run import analyze_run
 from clocksim import (
     CLOCK_FACTORIES,
+    add_scenario_args,
     make_clock_factory,
     run_scenario,
     save_run,
+    scenario_config_from_args,
+    scenario_config_to_dict,
+    scenario_options_from_args,
 )
 
 
@@ -36,6 +42,11 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _markdown_path(path: Path) -> str:
+    resolved = str(Path(path).resolve())
+    return f"[`{resolved}`](file://{url_quote(resolved, safe='/')})"
 
 
 def load_csv(path: Path) -> list[dict[str, str]]:
@@ -77,7 +88,11 @@ def lease_duration_label(lease_duration: float) -> str:
 
 
 def is_lease_clock(clock: str) -> bool:
-    return clock in {"lease_dvv", "membership_lease_dvv"}
+    return clock in {"lease_dvv", "lease_dvv_client", "membership_lease_dvv"}
+
+
+OBJECT_METADATA_KEY = "replica_state.avg_sibling_set_metadata_bytes"
+WRITE_STAMP_METADATA_KEY = "metadata.avg_metadata_bytes"
 
 
 def clock_variant(clock: str, lease_duration: float, lease_duration_count: int) -> str:
@@ -320,9 +335,9 @@ def make_tradeoff_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
         ]
         if dvv is None or not lease_rows:
             continue
-        dvv_bytes = float(dvv.get("metadata.avg_metadata_bytes", 0.0))
+        dvv_bytes = float(dvv.get(WRITE_STAMP_METADATA_KEY, 0.0))
         for lease in lease_rows:
-            lease_bytes = float(lease.get("metadata.avg_metadata_bytes", 0.0))
+            lease_bytes = float(lease.get(WRITE_STAMP_METADATA_KEY, 0.0))
             reduction = ((dvv_bytes - lease_bytes) / dvv_bytes * 100.0) if dvv_bytes else 0.0
             recall_loss = max(
                 float(dvv.get("accuracy.avg_recall", 0.0)) - float(lease.get("accuracy.avg_recall", 0.0)),
@@ -379,7 +394,8 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
                 "profile": row["profile"],
                 "clock": row["clock"],
                 "lease_duration": row["lease_duration"],
-                "avg_metadata_bytes": row.get("metadata.avg_metadata_bytes", 0.0),
+                "avg_metadata_bytes": row.get(WRITE_STAMP_METADATA_KEY, 0.0),
+                "avg_sibling_set_metadata_bytes": row.get(OBJECT_METADATA_KEY, 0.0),
                 "avg_recall": row.get("accuracy.avg_recall", 0.0),
                 "missed_conflict_rate": row.get("decision_quality.missed_conflict_rate", 0.0),
                 "stale_sibling_rate": row.get("decision_quality.stale_sibling_rate", 0.0),
@@ -389,7 +405,8 @@ def make_lease_ablation_plots(rows: list[dict[str, object]], output_dir: Path) -
     write_csv(output_dir / "lease_duration_ablation.csv", table_rows)
 
     specs = [
-        ("metadata.avg_metadata_bytes", "Average metadata bytes", "lease_ablation_metadata.png"),
+        (WRITE_STAMP_METADATA_KEY, "Average metadata bytes", "lease_ablation_metadata.png"),
+        (OBJECT_METADATA_KEY, "Average sibling-set metadata bytes", "lease_ablation_sibling_set_metadata.png"),
         ("accuracy.avg_recall", "Average history recall", "lease_ablation_recall.png"),
         ("decision_quality.stale_sibling_rate", "Stale sibling rate", "lease_ablation_stale_siblings.png"),
         ("metadata.pruned_write_rate", "Pruned write rate", "lease_ablation_pruning.png"),
@@ -439,21 +456,24 @@ def make_headline_table(rows: list[dict[str, object]], output_dir: Path) -> None
         lease_l16 = by_profile_clock.get((profile, "lease_dvv_L16"))
         if vv is None or dvv is None:
             continue
-        vv_bytes = float(vv.get("metadata.avg_metadata_bytes", 0.0))
-        dvv_bytes = float(dvv.get("metadata.avg_metadata_bytes", 0.0))
+        vv_bytes = float(vv.get(WRITE_STAMP_METADATA_KEY, 0.0))
+        dvv_bytes = float(dvv.get(WRITE_STAMP_METADATA_KEY, 0.0))
         reduction = ((vv_bytes - dvv_bytes) / vv_bytes * 100.0) if vv_bytes else 0.0
         table.append(
             {
                 "profile": profile,
                 "vv_bytes_mean": round(vv_bytes, 4),
-                "vv_bytes_stderr": vv.get("metadata.avg_metadata_bytes.stderr", 0.0),
+                "vv_bytes_stderr": vv.get(f"{WRITE_STAMP_METADATA_KEY}.stderr", 0.0),
                 "dvv_bytes_mean": round(dvv_bytes, 4),
-                "dvv_bytes_stderr": dvv.get("metadata.avg_metadata_bytes.stderr", 0.0),
+                "dvv_bytes_stderr": dvv.get(f"{WRITE_STAMP_METADATA_KEY}.stderr", 0.0),
                 "dvv_reduction_vs_vv_pct": round(reduction, 3),
+                "vv_sibling_set_bytes_mean": vv.get(OBJECT_METADATA_KEY, 0.0),
+                "dvv_sibling_set_bytes_mean": dvv.get(OBJECT_METADATA_KEY, 0.0),
                 "vv_recall": vv.get("accuracy.avg_recall", 0.0),
                 "dvv_recall": dvv.get("accuracy.avg_recall", 0.0),
-                "lease_l16_bytes_mean": lease_l16.get("metadata.avg_metadata_bytes", "") if lease_l16 else "",
-                "lease_l16_bytes_stderr": lease_l16.get("metadata.avg_metadata_bytes.stderr", "") if lease_l16 else "",
+                "lease_l16_bytes_mean": lease_l16.get(WRITE_STAMP_METADATA_KEY, "") if lease_l16 else "",
+                "lease_l16_bytes_stderr": lease_l16.get(f"{WRITE_STAMP_METADATA_KEY}.stderr", "") if lease_l16 else "",
+                "lease_l16_sibling_set_bytes_mean": lease_l16.get(OBJECT_METADATA_KEY, "") if lease_l16 else "",
                 "lease_l16_recall": lease_l16.get("accuracy.avg_recall", "") if lease_l16 else "",
             }
         )
@@ -505,7 +525,7 @@ def make_pareto_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
         profile = str(row["profile"])
         label = clock if clock not in plotted_labels else "_nolegend_"
         ax.scatter(
-            float(row.get("metadata.avg_metadata_bytes", 0.0)),
+            float(row.get(WRITE_STAMP_METADATA_KEY, 0.0)),
             float(row.get("accuracy.avg_recall", 0.0)),
             marker=markers.get(profile, "o"),
             s=55,
@@ -524,12 +544,15 @@ def make_pareto_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
 
 def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> None:
     specs = [
-        ("metadata.avg_metadata_bytes", "Avg metadata bytes", "Metadata Cost by Churn Profile", "metadata_bytes_vs_profile.png"),
+        (WRITE_STAMP_METADATA_KEY, "Avg metadata bytes", "Metadata Cost by Churn Profile", "metadata_bytes_vs_profile.png"),
         ("accuracy.avg_precision", "Average ancestry precision", "History Precision by Churn Profile", "precision_vs_profile.png"),
         ("accuracy.avg_recall", "Average ancestry recall", "History Recall by Churn Profile", "recall_vs_profile.png"),
+        ("replication_latency.avg_latency", "Average replication latency", "Replication Latency by Churn Profile", "replication_latency_vs_profile.png"),
+        ("client_latency.avg_latency", "Average client-visible write latency", "Client-visible Write Latency by Churn Profile", "client_write_latency_vs_profile.png"),
         ("decision_quality.missed_conflict_rate", "Missed conflict rate", "Conflict Loss by Churn Profile", "missed_conflicts_vs_profile.png"),
         ("decision_quality.stale_sibling_rate", "Stale sibling rate", "Stale Sibling Retention by Churn Profile", "stale_siblings_vs_profile.png"),
         ("replica_state.avg_hot_key_siblings", "Avg hot-key siblings", "Sibling Pressure by Churn Profile", "hot_key_siblings_vs_profile.png"),
+        (OBJECT_METADATA_KEY, "Avg sibling-set metadata bytes", "DVV Shared Sibling-Set Metadata by Churn Profile", "sibling_set_metadata_bytes_vs_profile.png"),
         ("replica_state.avg_stale_actor_fraction", "Avg stale replica-actor fraction", "Stale Replica Actor Pressure by Churn Profile", "stale_actor_fraction_vs_profile.png"),
     ]
     for metric_key, ylabel, title, filename in specs:
@@ -551,8 +574,10 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
 def clock_track(clock: str) -> str:
     if clock == "vv":
         return "Exact Baseline"
-    if clock == "dvv":
+    if clock in {"dvv", "dvv_client"}:
         return "DVV"
+    if clock in {"itc", "itc_client"}:
+        return "Interval Tree Clock"
     if clock.startswith("lease_dvv"):
         return "Approximate DVV"
     return "Other"
@@ -566,11 +591,12 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "",
         "## Scope",
         "",
-        "This experiment matrix compares exact VV, exact DVV, and lease-pruned DVV under the same churn-heavy workload.",
+        "This experiment matrix compares exact VV, exact DVV, exact ITC when selected, and lease-pruned DVV under the same churn-heavy workload.",
         "",
         "The simulator now separates true causal history from clock-encoded history, which makes the comparison meaningful on three axes:",
         "",
         "- metadata cost per write and per stored version",
+        "- secondary object/sibling-set metadata using DVV shared-summary factoring",
         "- conflict-handling accuracy on hot keys",
         "- ancestry loss introduced by lease pruning",
         "",
@@ -578,11 +604,12 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "",
         "| Clock | Encoded state | Main strength | Main failure mode under churn |",
         "| --- | --- | --- | --- |",
-        "| VV | Exact per-object vector over bounded client actors | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct clients touching an object |",
-        "| DVV | Prefix summary plus explicit dots over replica actors | Full ancestry precision with metadata bounded by replication degree | More complex representation and implementation |",
+        "| VV | Exact per-object vector over the configured actor domain | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct actors touching an object |",
+        "| DVV | Prefix summary plus explicit dots over the same configured actor domain | Full ancestry precision with compact sibling-set metadata when siblings share context | More complex representation and implementation; single-write stamps can carry summary overhead |",
+        "| ITC | Interval Tree Clock identity and event trees over the configured actor domain | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
         "",
-        "Related alternatives worth discussing in the paper, but not implemented here, are Interval Tree Clocks and Bounded Version Vectors for dynamic membership, plus HLC-style approximate causality if the study broadens beyond exact version ancestry.",
+        "Related alternatives worth discussing in the paper, but not implemented here, are Bounded Version Vectors and HLC-style approximate causality if the study broadens beyond exact version ancestry.",
         "",
         "## Benchmark Design",
         "",
@@ -590,12 +617,15 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         f"- Clocks: {', '.join(clocks)}",
         f"- Seeds: {experiment_config['seeds']}",
         f"- Lease-DVV durations: {experiment_config['lease_durations']}",
-        f"- Hot-key probability: {experiment_config['hot_key_probability']}",
+        f"- Key distribution: {experiment_config['key_distribution']} (hot-key p={experiment_config['hot_key_probability']}, zipf skew={experiment_config['zipf_skew']})",
+        f"- Actor domain: {experiment_config['actor_domain']}",
         f"- Client actor pool: {experiment_config['client_count']}",
         f"- Replication factor: {experiment_config['replication_factor']}",
         f"- Contention burst every {experiment_config['burst_interval']} time units with {experiment_config['burst_writers']} writers",
         "",
-        "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV uses a bounded client actor pool with carried per-key session context, and DVV/lease-DVV use replica dots. This keeps the main comparison on the same per-object causality semantics.",
+        "Each run mixes background read-then-write traffic with explicit hot-key contention bursts and later merge writes. Exact VV, DVV, and lease-DVV use the same configured actor domain (`physical`, `slot`, or `client`) so metadata differences are not caused by mixing actor identities.",
+        "",
+        "The headline metadata plot uses the stable per-write stamp metric. A separate sibling-set metadata plot accounts for the optimized DVV object form, where common sibling ancestry is stored once and each sibling contributes its dot.",
         "",
         "## Aggregated Findings",
         "",
@@ -605,7 +635,8 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         [
             "### Track Structure",
             "",
-            "- Apples-to-apples track: compare `vv` vs `dvv` vs all `lease_dvv` variants.",
+            "- Apples-to-apples exact track: compare `vv` vs `dvv` vs `itc` when selected.",
+            "- Approximate track: compare exact clocks against all `lease_dvv` variants.",
             "",
         ]
     )
@@ -619,8 +650,11 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
                 for item in rows
                 if str(item["profile"]) == profile and str(item["clock"]) == clock
             )
+            stamp_bytes = float(row.get(WRITE_STAMP_METADATA_KEY, 0.0))
+            sibling_set_bytes = float(row.get(OBJECT_METADATA_KEY, 0.0))
             lines.append(
-                f"- `{clock}` ({clock_track(clock)}): metadata {row.get('metadata.avg_metadata_bytes', 0):.2f} B, "
+                f"- `{clock}` ({clock_track(clock)}): metadata {stamp_bytes:.2f} B, "
+                f"sibling-set metadata {sibling_set_bytes:.2f} B, "
                 f"precision {row.get('accuracy.avg_precision', 0):.3f}, "
                 f"recall {row.get('accuracy.avg_recall', 0):.3f}, "
                 f"missed conflicts {row.get('decision_quality.missed_conflict_rate', 0):.3f}, "
@@ -632,13 +666,20 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         [
             "## Interpretation",
             "",
-            "- `vv` is the exact vanilla baseline. It shows the metadata cost of preserving full object ancestry with bounded client actors.",
-            "- `dvv` should match `vv` on correctness while reducing metadata by using replica-issued dots rather than tracking every client actor in the version vector.",
+            "- `vv` is the exact vanilla baseline for the selected actor domain. It shows the metadata cost of preserving full object ancestry with a plain vector.",
+            "- `dvv` should match `vv` on correctness while representing writes as explicit dots plus compact causal context over the same actor domain.",
+            "- `replica_state.avg_sibling_set_metadata_bytes` is a secondary object/read-response metric that credits DVV-family clocks for shared sibling summaries.",
+            "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over the configured actor domain; compare its tree metadata against the exact VV and DVV baselines.",
             "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
             "",
             "## Outputs",
             "",
             "- `comparison_by_clock.csv`: aggregated metrics by churn profile and clock",
+            "- `headline_results.csv`: per-write metadata headline table with sibling-set side columns",
+            "- `metadata_bytes_vs_profile.png`: headline per-write stamp metadata plot",
+            "- `sibling_set_metadata_bytes_vs_profile.png`: secondary DVV shared-summary object metadata plot",
+            "- `client_write_latency_vs_profile.png`: client-visible write-latency plot",
+            "- `replication_latency_vs_profile.png`: replication-delivery-latency plot",
             "- `lease_duration_ablation.csv`: lease-DVV metadata/correctness ablation table",
             "- `time_series_report/`: profile-by-profile time-series plots",
             "- `metadata_reduction_vs_recall_loss.png`: lease-DVV tradeoff summary",
@@ -647,6 +688,64 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
     )
 
     (output_dir / "study_report.md").write_text("\n".join(lines))
+
+
+def run_experiment_case(spec: dict[str, object]) -> dict[str, object]:
+    """Execute one isolated profile/clock/seed case.
+
+    Kept as a top-level function so ProcessPoolExecutor can pickle it. The
+    parent process is still responsible for aggregate CSVs, plots, and reports.
+    """
+
+    profile = str(spec["profile"])
+    clock = str(spec["clock"])
+    variant = str(spec["variant"])
+    lease_duration = float(spec["lease_duration"])
+    seed = int(spec["seed"])
+    run_name = str(spec["run_name"])
+    run_dir = Path(str(spec["run_dir"]))
+    scenario_config = spec["scenario_config"]
+    experiment_config = spec["experiment_config"]
+    analysis_window = float(spec["analysis_window"])
+
+    metrics = run_scenario(
+        config=scenario_config,
+        clock_factory=make_clock_factory(clock, lease_duration),
+    )
+    run_config = {
+        **experiment_config,
+        **scenario_config_to_dict(scenario_config),
+        "clock": clock,
+        "clock_variant": variant,
+        "lease_duration": lease_duration if is_lease_clock(clock) else None,
+    }
+    save_run(
+        metrics,
+        output_dir=run_dir,
+        run_name=run_name,
+        config=run_config,
+        sim_time=scenario_config.sim_time,
+    )
+    analysis_dir = run_dir / f"{run_name}_analysis"
+    sections = analyze_run(
+        input_dir=run_dir,
+        run_name=run_name,
+        window=analysis_window,
+        output_dir=analysis_dir,
+    )
+    row = {
+        "_order": int(spec["order"]),
+        "profile": profile,
+        "clock": variant,
+        "clock_family": clock,
+        "lease_duration": lease_duration if is_lease_clock(clock) else "",
+        "seed": seed,
+        "run_name": run_name,
+        "run_dir": str(run_dir),
+        "analysis_dir": str(analysis_dir),
+    }
+    row.update(flatten_sections(sections))
+    return row
 
 
 def build_parser() -> configargparse.ArgParser:
@@ -659,29 +758,18 @@ def build_parser() -> configargparse.ArgParser:
     parser.add("--clocks", nargs="+", choices=sorted(CLOCK_FACTORIES), default=["vv", "dvv", "lease_dvv"])
     parser.add("--profiles", nargs="+", choices=["stable", "low", "sustained", "burst"], default=["stable", "sustained", "burst"])
     parser.add("--seeds", nargs="+", type=int, default=[7, 17, 29])
-    parser.add("--sim-time", type=float, default=240.0)
-    parser.add("--initial-size", type=int, default=10)
-    parser.add("--write-interval", type=float, default=5.0)
-    parser.add("--client-think-time", type=float, default=4.0)
-    parser.add("--merge-probability", type=float, default=0.35)
-    parser.add("--burst-interval", type=float, default=18.0)
-    parser.add("--burst-writers", type=int, default=4)
-    parser.add("--burst-spread", type=float, default=2.0)
-    parser.add("--merge-delay", type=float, default=10.0)
-    parser.add("--same-coordinator-probability", type=float, default=0.75)
-    parser.add("--max-nodes", type=int, default=28)
-    parser.add("--min-nodes", type=int, default=4)
-    parser.add("--min-lat", type=float, default=1.0)
-    parser.add("--max-lat", type=float, default=5.0)
-    parser.add("--key-count", type=int, default=12)
-    parser.add("--hot-key-probability", type=float, default=0.65)
-    parser.add("--client-count", type=int, default=128)
-    parser.add("--replication-factor", type=int, default=4)
-    parser.add("--sample-interval", type=float, default=10.0)
+    add_scenario_args(parser)
     parser.add("--lease-duration", type=float, default=16.0)
     parser.add("--lease-durations", nargs="+", type=float, default=None)
+    parser.add(
+        "--fixed-lease-duration",
+        action="store_true",
+        help="Ignore --lease-durations and run lease clocks only at --lease-duration.",
+    )
     parser.add("--analysis-window", type=float, default=12.0)
     parser.add("--write-pdf", action="store_true", help="Also write PDF copies of generated report plots.")
+    parser.add("--jobs", type=int, default=1, help="Number of isolated experiment runs to execute in parallel.")
+    parser.add("--progress", action="store_true", help="Show an overall tqdm bar for completed experiment runs.")
     parser.add("--output-dir", default="output/experiments")
     parser.add("--experiment-name", default="per_object_clock_study")
     return parser
@@ -691,7 +779,9 @@ def main() -> None:
     global WRITE_PDF
     args = build_parser().parse_args()
     WRITE_PDF = args.write_pdf
-    lease_durations = args.lease_durations or [args.lease_duration]
+    if args.jobs < 1:
+        raise SystemExit("--jobs must be >= 1")
+    lease_durations = [args.lease_duration] if args.fixed_lease_duration else (args.lease_durations or [args.lease_duration])
     experiment_dir = Path(args.output_dir) / args.experiment_name
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
@@ -699,35 +789,20 @@ def main() -> None:
         "clocks": args.clocks,
         "profiles": args.profiles,
         "seeds": args.seeds,
-        "sim_time": args.sim_time,
-        "initial_size": args.initial_size,
-        "write_interval": args.write_interval,
-        "client_think_time": args.client_think_time,
-        "merge_probability": args.merge_probability,
-        "burst_interval": args.burst_interval,
-        "burst_writers": args.burst_writers,
-        "burst_spread": args.burst_spread,
-        "merge_delay": args.merge_delay,
-        "same_coordinator_probability": args.same_coordinator_probability,
-        "max_nodes": args.max_nodes,
-        "min_nodes": args.min_nodes,
-        "min_lat": args.min_lat,
-        "max_lat": args.max_lat,
-        "key_count": args.key_count,
-        "hot_key_probability": args.hot_key_probability,
-        "client_count": args.client_count,
-        "replication_factor": args.replication_factor,
-        "sample_interval": args.sample_interval,
-        "lease_duration": lease_durations[0],
+        **scenario_options_from_args(args),
+        "lease_duration": args.lease_duration,
         "lease_durations": lease_durations,
+        "fixed_lease_duration": args.fixed_lease_duration,
         "analysis_window": args.analysis_window,
         "write_pdf": args.write_pdf,
+        "jobs": args.jobs,
+        "progress": args.progress,
         "output_dir": args.output_dir,
         "experiment_name": args.experiment_name,
     }
     (experiment_dir / "experiment_config.json").write_text(json.dumps(experiment_config, indent=2))
 
-    run_rows: list[dict[str, object]] = []
+    run_specs: list[dict[str, object]] = []
     for profile in args.profiles:
         for clock in args.clocks:
             clock_lease_durations = lease_durations if is_lease_clock(clock) else [lease_durations[0]]
@@ -735,72 +810,57 @@ def main() -> None:
                 variant = clock_variant(clock, lease_duration, len(clock_lease_durations))
                 for seed in args.seeds:
                     run_name = f"{profile}_{variant}_seed{seed}"
-                    run_dir = experiment_dir / run_name
-                    metrics = run_scenario(
-                        profile=profile,
-                        clock_factory=make_clock_factory(clock, lease_duration),
-                        sim_time=args.sim_time,
-                        seed=seed,
-                        initial_size=args.initial_size,
-                        write_interval=args.write_interval,
-                        max_nodes=args.max_nodes,
-                        min_nodes=args.min_nodes,
-                        min_lat=args.min_lat,
-                        max_lat=args.max_lat,
-                        key_count=args.key_count,
-                        hot_key_probability=args.hot_key_probability,
-                        client_count=args.client_count,
-                        replication_factor=args.replication_factor,
-                        sample_interval=args.sample_interval,
-                        client_think_time=args.client_think_time,
-                        merge_probability=args.merge_probability,
-                        burst_interval=args.burst_interval,
-                        burst_writers=args.burst_writers,
-                        burst_spread=args.burst_spread,
-                        merge_delay=args.merge_delay,
-                        same_coordinator_probability=args.same_coordinator_probability,
+                    run_specs.append(
+                        {
+                            "order": len(run_specs),
+                            "profile": profile,
+                            "clock": clock,
+                            "variant": variant,
+                            "lease_duration": lease_duration,
+                            "seed": seed,
+                            "run_name": run_name,
+                            "run_dir": str(experiment_dir / run_name),
+                            "scenario_config": scenario_config_from_args(args, profile=profile, seed=seed),
+                            "experiment_config": experiment_config,
+                            "analysis_window": args.analysis_window,
+                        }
                     )
-                    run_config = {
-                        **experiment_config,
-                        "profile": profile,
-                        "clock": clock,
-                        "clock_variant": variant,
-                        "seed": seed,
-                        "lease_duration": lease_duration if is_lease_clock(clock) else None,
-                    }
-                    save_run(
-                        metrics,
-                        output_dir=run_dir,
-                        run_name=run_name,
-                        config=run_config,
-                        sim_time=args.sim_time,
-                    )
-                    analysis_dir = run_dir / f"{run_name}_analysis"
-                    sections = analyze_run(
-                        input_dir=run_dir,
-                        run_name=run_name,
-                        window=args.analysis_window,
-                        output_dir=analysis_dir,
-                    )
-                    row = {
-                        "profile": profile,
-                        "clock": variant,
-                        "clock_family": clock,
-                        "lease_duration": lease_duration if is_lease_clock(clock) else "",
-                        "seed": seed,
-                        "run_name": run_name,
-                        "run_dir": str(run_dir),
-                        "analysis_dir": str(analysis_dir),
-                    }
-                    row.update(flatten_sections(sections))
-                    run_rows.append(row)
 
+    progress_bar = None
+    if args.progress:
+        from tqdm.auto import tqdm
+
+        progress_bar = tqdm(total=len(run_specs), desc="experiment runs", unit="run")
+
+    run_rows: list[dict[str, object]] = []
+    try:
+        if args.jobs == 1:
+            for spec in run_specs:
+                run_rows.append(run_experiment_case(spec))
+                if progress_bar is not None:
+                    progress_bar.update(1)
+        else:
+            with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+                futures = [executor.submit(run_experiment_case, spec) for spec in run_specs]
+                for future in as_completed(futures):
+                    run_rows.append(future.result())
+                    if progress_bar is not None:
+                        progress_bar.update(1)
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+
+    run_rows.sort(key=lambda row: int(row.pop("_order")))
+    if args.progress:
+        print("Building aggregate CSVs, plots, time-series, and report...")
     write_csv(experiment_dir / "comparison_runs.csv", run_rows)
     aggregated_rows = aggregate_runs(run_rows)
     write_csv(experiment_dir / "comparison_by_clock.csv", aggregated_rows)
     make_comparison_plots(aggregated_rows, experiment_dir)
     write_time_series_report_plots(run_rows, experiment_dir)
     build_report(aggregated_rows, experiment_dir, experiment_config)
+    print(f"Report: {_markdown_path(experiment_dir / 'study_report.md')}")
+    print(f"Time series: {_markdown_path(experiment_dir / 'time_series_report')}")
 
 
 if __name__ == "__main__":

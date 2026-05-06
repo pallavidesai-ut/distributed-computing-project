@@ -80,10 +80,29 @@ fi
 
 OUTPUT_PATH="$(pwd)/$OUTPUT_DIR_ROOT/$EXPERIMENT_NAME"
 
+uri_for_path() {
+  "$PYTHON" - "$1" <<'PY'
+import pathlib
+import urllib.parse
+import sys
+
+path = pathlib.Path(sys.argv[1]).resolve()
+print(urllib.parse.quote(str(path), safe="/"))
+PY
+}
+
+show_path() {
+  local label="$1"
+  local path="$2"
+  local uri
+  uri="$(uri_for_path "$path")"
+  echo "  $label: [\"${path}\"](file://$uri)"
+}
+
 echo "Running final experiment matrix"
 echo "  config: $CONFIG_PATH"
 echo "  experiment: $EXPERIMENT_NAME"
-echo "  output: $OUTPUT_PATH"
+show_path "output" "$OUTPUT_PATH"
 if [[ $# -gt 0 ]]; then
   "$PYTHON" run_experiments.py --config "$CONFIG_PATH" "$@" --experiment-name "$EXPERIMENT_NAME"
 else
@@ -95,5 +114,14 @@ cp "$CONFIG_PATH" "$OUTPUT_PATH/source_config.yaml"
 
 if [[ "${SKIP_ORGANIZE:-0}" != "1" ]]; then
   "$PYTHON" scripts/organize_experiment.py "$OUTPUT_PATH"
-  echo "  organized: $OUTPUT_PATH"
+  show_path "organized" "$OUTPUT_PATH"
+  show_path "report" "$OUTPUT_PATH/study_report.md"
+  show_path "time series" "$OUTPUT_PATH/time_series"
+else
+  show_path "report" "$OUTPUT_PATH/study_report.md"
+  show_path "time series" "$OUTPUT_PATH/time_series_report"
+fi
+
+if [[ -f "$OUTPUT_PATH/manifest.json" ]]; then
+  show_path "manifest" "$OUTPUT_PATH/manifest.json"
 fi

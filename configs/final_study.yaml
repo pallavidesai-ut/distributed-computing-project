@@ -5,7 +5,7 @@ clocks:
   - vv
   - dvv
   - lease_dvv
-  - vv_vnode
+
 profiles:
   - stable
   - low
@@ -13,6 +13,8 @@ profiles:
   - burst
 
 # Five seeds is the minimum paper-ready sweep. Increase to 10 if runtime allows.
+actor-domain: physical
+
 seeds:
   - 1
   - 2
@@ -20,7 +22,9 @@ seeds:
   - 4
   - 5
 
-sim-time: 240.0
+
+
+sim-time: 1000.0
 initial-size: 10
 write-interval: 5.0
 client-think-time: 4.0
@@ -41,8 +45,6 @@ replication-factor: 4
 sample-interval: 10.0
 lease-duration: 16.0
 lease-durations:
-  - 8.0
-  - 16.0
   - 32.0
 analysis-window: 12.0
 output-dir: output/experiments

@@ -1,8 +1,10 @@
 # Replication-factor sensitivity: higher fanout.
 # Purpose: test whether broader replica coverage improves merge visibility while increasing replica-context metadata.
 
-clocks: [vv, dvv, lease_dvv, vv_vnode]
+clocks: [vv, dvv, lease_dvv]
 profiles: [stable, sustained]
+actor-domain: physical
+
 seeds: [1, 2, 3]
 
 sim-time: 240.0

@@ -1,0 +1,47 @@
+# Extreme dynamic-client workload designed to stress fixed actor-name vectors.
+# Goal: demonstrate when ITC's actor-name-free tree metadata can beat exact VV.
+# DVV is included as the replica-dot baseline and is still expected to be much smaller.
+# Run with:
+#   scripts/reproduce_final.sh configs/itc_extreme_dynamic_clients.yaml
+
+clocks:
+  - vv
+  - dvv
+  - itc
+profiles:
+  - stable
+
+actor-domain: client
+
+seeds:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+
+sim-time: 30.0
+initial-size: 4
+write-interval: 0.5
+client-think-time: 0.01
+merge-probability: 1.0
+burst-interval: 8.0
+burst-writers: 20
+burst-spread: 0.1
+merge-delay: 0.5
+same-coordinator-probability: 0.2
+max-nodes: 4
+min-nodes: 4
+min-lat: 0.01
+max-lat: 0.02
+key-count: 1
+hot-key-probability: 1.0
+# Large actor namespace forces VV to repeatedly serialize long, mostly unique
+# client IDs in hot-object contexts; ITC carries tree structure instead.
+client-count: 1000000
+replication-factor: 2
+sample-interval: 5.0
+lease-duration: 60.0
+analysis-window: 5.0
+output-dir: output/experiments
+experiment-name: itc_extreme_dynamic_clients

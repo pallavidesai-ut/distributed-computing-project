@@ -1,8 +1,10 @@
 # Client-count sensitivity: high writer cardinality.
 # Purpose: stress exact client-actor VV by increasing distinct writers while DVV remains replica-dot based.
 
-clocks: [vv, dvv, lease_dvv, vv_vnode]
+clocks: [vv, dvv, lease_dvv]
 profiles: [stable, sustained]
+actor-domain: client
+
 seeds: [1, 2, 3]
 
 sim-time: 240.0

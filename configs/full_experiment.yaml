@@ -1,6 +1,5 @@
 clocks:
   - vv
-  - vv_vnode
   - dvv
   - lease_dvv
 profiles:
@@ -8,6 +7,8 @@ profiles:
   - low
   - sustained
   - burst
+
+actor-domain: physical
 
 seeds:
   - 7

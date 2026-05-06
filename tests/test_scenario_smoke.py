@@ -5,7 +5,7 @@ import pytest
 from clocksim import make_clock_factory, run_scenario
 
 
-def tiny_scenario(clock: str, *, lease_duration: float = 60.0):
+def tiny_scenario(clock: str, *, lease_duration: float = 60.0, actor_domain: str = "physical"):
     return run_scenario(
         profile="stable",
         clock_factory=make_clock_factory(clock, lease_duration),
@@ -29,10 +29,11 @@ def tiny_scenario(clock: str, *, lease_duration: float = 60.0):
         burst_spread=0.2,
         merge_delay=1.0,
         same_coordinator_probability=0.8,
+        actor_domain=actor_domain,
     )
 
 
-@pytest.mark.parametrize("clock", ["vv", "dvv"])
+@pytest.mark.parametrize("clock", ["vv", "dvv", "dvv_client", "itc"])
 def test_exact_clocks_have_perfect_history_fidelity_in_smoke_run(clock: str) -> None:
     metrics = tiny_scenario(clock)
     summary = metrics.summary(40.0)
@@ -42,6 +43,18 @@ def test_exact_clocks_have_perfect_history_fidelity_in_smoke_run(clock: str) -> 
     assert summary["avg_history_recall"] == pytest.approx(1.0)
     assert all(float(row["precision"]) == pytest.approx(1.0) for row in metrics.accuracy)
     assert all(float(row["recall"]) == pytest.approx(1.0) for row in metrics.accuracy)
+
+
+def test_actor_domain_controls_clock_actor_identity() -> None:
+    expected_prefix = {
+        "physical": "n",
+        "slot": "r",
+        "client": "c",
+    }
+    for actor_domain, prefix in expected_prefix.items():
+        metrics = tiny_scenario("dvv", actor_domain=actor_domain)
+        assert metrics.writes
+        assert all(str(row["actor_id"]).startswith(prefix) for row in metrics.writes)
 
 
 def test_aggressive_lease_dvv_prunes_and_loses_some_recall_in_smoke_run() -> None:

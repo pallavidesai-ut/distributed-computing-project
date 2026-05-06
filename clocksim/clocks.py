@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .context import CausalContext, Dot, compact_context, compare_contexts, union_contexts
+from .itc import ITCCoreStamp, ITCEventTree, ITCIdTree
 
 
 class BaseStamp(ABC):
@@ -110,10 +111,93 @@ class DVVStamp(BaseStamp):
 
 
 @dataclass
+class ITCStamp(BaseStamp):
+    """Simulator stamp backed by a real Interval Tree Clock timestamp.
+
+    ``context`` is a non-serialized sidecar used only by the simulator's
+    ground-truth/accuracy metrics, which are expressed in object-local dots.
+    Ordering decisions for ITC stamps use the ITC event tree, not this sidecar.
+    """
+
+    identity: ITCIdTree
+    event: ITCEventTree
+    new_dot: Dot
+    context: CausalContext
+    stamp_type = "itc"
+
+    @property
+    def dot(self) -> Dot:
+        return self.new_dot
+
+    def represented_context(self) -> CausalContext:
+        return self.context.clone()
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "type": self.stamp_type,
+            "id": self.identity.to_obj(),
+            "event": self.event.to_obj(),
+        }
+
+    def metadata_component_count(self) -> int:
+        return self.identity.node_count() + self.event.node_count()
+
+
+@dataclass
+class ITCReadContext:
+    event: ITCEventTree = field(default_factory=ITCEventTree.leaf)
+    context: CausalContext = field(default_factory=CausalContext)
+
+
+@dataclass
 class NodeClockState:
     node_id: str
+    clock_actor_id: str | None = None
     local_counters: dict[str, int] = field(default_factory=dict)
     leases: dict[str, dict[str, float]] = field(default_factory=lambda: defaultdict(dict))
+
+    @property
+    def actor_id(self) -> str:
+        return self.clock_actor_id or self.node_id
+
+
+@dataclass
+class PrunedContext:
+    context: CausalContext
+    pruned_actors: int
+    pruned_events: int
+
+
+def prune_context(
+    read_context: CausalContext,
+    *,
+    actor_is_live: Callable[[str], bool],
+) -> PrunedContext:
+    compacted = compact_context(read_context.prefix, set(read_context.dots))
+    live_prefix: dict[str, int] = {}
+    live_dots: set[Dot] = set()
+    pruned_actors: set[str] = set()
+    pruned_events = 0
+
+    for actor, counter in compacted.prefix.items():
+        if actor_is_live(actor):
+            live_prefix[actor] = counter
+        else:
+            pruned_actors.add(actor)
+            pruned_events += counter
+
+    for dot in compacted.dots:
+        if actor_is_live(dot.actor):
+            live_dots.add(dot)
+        else:
+            pruned_actors.add(dot.actor)
+            pruned_events += 1
+
+    return PrunedContext(
+        context=compact_context(live_prefix, live_dots),
+        pruned_actors=len(pruned_actors),
+        pruned_events=pruned_events,
+    )
 
 
 class ClockModel(ABC):
@@ -189,8 +273,97 @@ class VersionVectorModel(ClockModel):
 
 
 
+class IntervalTreeClockModel(ClockModel):
+    """Exact per-object Interval Tree Clock over dynamic client actors.
+
+    The simulator's exact VV baseline uses client actors, so ITC does the same
+    to preserve the same causality contract while replacing the fixed actor
+    vector with ITC identity/event trees.  Actor identities are allocated by
+    repeatedly forking a reserved seed identity; each object key has an
+    independent event tree so causality remains per-object.
+    """
+
+    name = "itc"
+
+    def __init__(self) -> None:
+        self._seed_identity = ITCIdTree.one()
+        self._actor_identities: dict[str, ITCIdTree] = {}
+        self._actor_events: dict[str, dict[str, ITCEventTree]] = defaultdict(dict)
+        self._actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
+
+    def _identity_for_actor(self, actor_id: str) -> ITCIdTree:
+        identity = self._actor_identities.get(actor_id)
+        if identity is None:
+            actor_identity, remaining = self._seed_identity.split()
+            self._actor_identities[actor_id] = actor_identity
+            self._seed_identity = remaining
+            identity = actor_identity
+        return identity.clone()
+
+    def build_read_context(self, versions: list["VersionRecord"]) -> ITCReadContext:
+        event = ITCEventTree.leaf(0)
+        contexts: list[CausalContext] = []
+        for version in versions:
+            if not isinstance(version.stamp, ITCStamp):
+                raise TypeError("IntervalTreeClockModel can only read ITC stamps")
+            event = event.join(version.stamp.event)
+            contexts.append(version.stamp.represented_context())
+        return ITCReadContext(event=event, context=union_contexts(contexts))
+
+    def issue_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        read_context: CausalContext,
+        now: float,
+        actor_id: str,
+    ) -> BaseStamp:
+        if not isinstance(read_context, ITCReadContext):
+            raise TypeError("IntervalTreeClockModel requires an ITCReadContext")
+        identity = self._identity_for_actor(actor_id)
+        current_event = self._actor_events[actor_id].get(key, ITCEventTree.leaf(0))
+        process_stamp = ITCCoreStamp(identity=identity, event=current_event.join(read_context.event))
+        process_stamp.event_occurred()
+        self._actor_events[actor_id][key] = process_stamp.event.clone()
+
+        next_counter = max(
+            self._actor_counters[actor_id].get(key, 0),
+            read_context.context.max_counter(actor_id),
+        ) + 1
+        self._actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
+        represented = compact_context(
+            read_context.context.prefix,
+            set(read_context.context.dots) | {dot},
+        )
+        return ITCStamp(
+            identity=process_stamp.identity.clone(),
+            event=process_stamp.event.clone(),
+            new_dot=dot,
+            context=represented,
+        )
+
+    def compare_stamps(self, left: BaseStamp, right: BaseStamp) -> str:
+        if not isinstance(left, ITCStamp) or not isinstance(right, ITCStamp):
+            return super().compare_stamps(left, right)
+        if left.event == right.event:
+            return "equal"
+        left_includes_right = right.event.leq(left.event)
+        right_includes_left = left.event.leq(right.event)
+        if left_includes_right and not right_includes_left:
+            return "dominates"
+        if right_includes_left and not left_includes_right:
+            return "dominated"
+        return "concurrent"
+
+
 class DottedVersionVectorModel(ClockModel):
+    """Exact per-object DVV over the configured causal actor domain."""
+
     name = "dvv"
+
+    def __init__(self) -> None:
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
 
     def build_read_context(self, versions: list["VersionRecord"]) -> CausalContext:
         return union_contexts(version.stamp.represented_context() for version in versions)
@@ -205,11 +378,11 @@ class DottedVersionVectorModel(ClockModel):
     ) -> BaseStamp:
         compacted = compact_context(read_context.prefix, set(read_context.dots))
         next_counter = max(
-            state.local_counters.get(key, 0),
-            compacted.max_counter(state.node_id),
+            self.actor_counters[actor_id].get(key, 0),
+            compacted.max_counter(actor_id),
         ) + 1
-        state.local_counters[key] = next_counter
-        dot = Dot(state.node_id, next_counter)
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
         exceptions = set(compacted.dots)
         exceptions.discard(dot)
         return DVVStamp(
@@ -220,23 +393,10 @@ class DottedVersionVectorModel(ClockModel):
         )
 
 
-class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
-    name = "lease_dvv"
+class ClientDottedVersionVectorModel(DottedVersionVectorModel):
+    """Exact DVV over the same client actor domain used by VV and ITC."""
 
-    def __init__(self, lease_duration: float) -> None:
-        self.lease_duration = lease_duration
-
-    def observe_stamp(
-        self,
-        state: NodeClockState,
-        key: str,
-        stamp: BaseStamp,
-        now: float,
-    ) -> None:
-        super().observe_stamp(state, key, stamp, now)
-        expiry = now + self.lease_duration
-        for actor in stamp.actor_entries():
-            state.leases[key][actor] = expiry
+    name = "dvv_client"
 
     def issue_stamp(
         self,
@@ -247,40 +407,122 @@ class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
         actor_id: str,
     ) -> BaseStamp:
         compacted = compact_context(read_context.prefix, set(read_context.dots))
-        live_prefix: dict[str, int] = {}
-        live_dots: set[Dot] = set()
-        pruned_actors: set[str] = set()
-        pruned_events = 0
-        expiries = state.leases[key]
-
-        for actor, counter in compacted.prefix.items():
-            if actor == state.node_id or expiries.get(actor, float("-inf")) > now:
-                live_prefix[actor] = counter
-            else:
-                pruned_actors.add(actor)
-                pruned_events += counter
-
-        for dot in compacted.dots:
-            if dot.actor == state.node_id or expiries.get(dot.actor, float("-inf")) > now:
-                live_dots.add(dot)
-            else:
-                pruned_actors.add(dot.actor)
-                pruned_events += 1
-
-        live_context = compact_context(live_prefix, live_dots)
         next_counter = max(
-            state.local_counters.get(key, 0),
-            live_context.max_counter(state.node_id),
+            self.actor_counters[actor_id].get(key, 0),
+            compacted.max_counter(actor_id),
         ) + 1
-        state.local_counters[key] = next_counter
-        dot = Dot(state.node_id, next_counter)
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
+        exceptions = set(compacted.dots)
+        exceptions.discard(dot)
+        return DVVStamp(
+            summary=dict(compacted.prefix),
+            exceptions=exceptions,
+            new_dot=dot,
+            type_name=self.name,
+        )
+
+
+class LeaseClientDottedVersionVectorModel(ClientDottedVersionVectorModel):
+    """Client-domain DVV with lease pruning for direct dynamic-actor studies."""
+
+    name = "lease_dvv_client"
+
+    def __init__(self, lease_duration: float) -> None:
+        self.lease_duration = lease_duration
+        self.client_counters: dict[str, dict[str, int]] = defaultdict(dict)
+
+    def observe_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        stamp: BaseStamp,
+        now: float,
+    ) -> None:
+        # Dot-renewed leases: only direct evidence from the actor's own new
+        # event renews its lease. Transitive mentions in the causal context do
+        # not keep stale actors alive.
+        state.leases[key][stamp.dot.actor] = now + self.lease_duration
+
+    def issue_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        read_context: CausalContext,
+        now: float,
+        actor_id: str,
+    ) -> BaseStamp:
+        expiries = state.leases[key]
+        pruned = prune_context(
+            read_context,
+            actor_is_live=lambda actor: actor == actor_id or expiries.get(actor, float("-inf")) > now,
+        )
+        live_context = pruned.context
+        next_counter = max(
+            self.client_counters[actor_id].get(key, 0),
+            live_context.max_counter(actor_id),
+        ) + 1
+        self.client_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
         stamp = DVVStamp(
             summary=dict(live_context.prefix),
             exceptions=set(live_context.dots),
             new_dot=dot,
             type_name=self.name,
-            pruned_actors=len(pruned_actors),
-            pruned_events=pruned_events,
+            pruned_actors=pruned.pruned_actors,
+            pruned_events=pruned.pruned_events,
+        )
+        self.observe_stamp(state, key, stamp, now)
+        return stamp
+
+
+class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
+    name = "lease_dvv"
+
+    def __init__(self, lease_duration: float) -> None:
+        self.lease_duration = lease_duration
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
+
+    def observe_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        stamp: BaseStamp,
+        now: float,
+    ) -> None:
+        super().observe_stamp(state, key, stamp, now)
+        # Dot-renewed leases: only direct evidence from the actor's own new
+        # event renews its lease. Transitive mentions in the causal context do
+        # not keep stale actors alive.
+        state.leases[key][stamp.dot.actor] = now + self.lease_duration
+
+    def issue_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        read_context: CausalContext,
+        now: float,
+        actor_id: str,
+    ) -> BaseStamp:
+        expiries = state.leases[key]
+        pruned = prune_context(
+            read_context,
+            actor_is_live=lambda actor: actor == actor_id or expiries.get(actor, float("-inf")) > now,
+        )
+        live_context = pruned.context
+        next_counter = max(
+            self.actor_counters[actor_id].get(key, 0),
+            live_context.max_counter(actor_id),
+        ) + 1
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
+        stamp = DVVStamp(
+            summary=dict(live_context.prefix),
+            exceptions=set(live_context.dots),
+            new_dot=dot,
+            type_name=self.name,
+            pruned_actors=pruned.pruned_actors,
+            pruned_events=pruned.pruned_events,
         )
         self.observe_stamp(state, key, stamp, now)
         return stamp
@@ -298,6 +540,7 @@ class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
 
     def __init__(self, lease_duration: float) -> None:
         self.lease_duration = lease_duration
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
         self.active_actors: set[str] = set()
         self.departure_expiry: dict[str, float] = {}
 
@@ -324,51 +567,41 @@ class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
         now: float,
         actor_id: str,
     ) -> BaseStamp:
-        compacted = compact_context(read_context.prefix, set(read_context.dots))
-        live_prefix: dict[str, int] = {}
-        live_dots: set[Dot] = set()
-        pruned_actors: set[str] = set()
-        pruned_events = 0
-
-        for actor, counter in compacted.prefix.items():
-            if self._actor_is_live(actor, state.node_id, now):
-                live_prefix[actor] = counter
-            else:
-                pruned_actors.add(actor)
-                pruned_events += counter
-
-        for dot in compacted.dots:
-            if self._actor_is_live(dot.actor, state.node_id, now):
-                live_dots.add(dot)
-            else:
-                pruned_actors.add(dot.actor)
-                pruned_events += 1
-
-        live_context = compact_context(live_prefix, live_dots)
+        pruned = prune_context(
+            read_context,
+            actor_is_live=lambda actor: self._actor_is_live(actor, actor_id, now),
+        )
+        live_context = pruned.context
         next_counter = max(
-            state.local_counters.get(key, 0),
-            live_context.max_counter(state.node_id),
+            self.actor_counters[actor_id].get(key, 0),
+            live_context.max_counter(actor_id),
         ) + 1
-        state.local_counters[key] = next_counter
-        dot = Dot(state.node_id, next_counter)
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
         return DVVStamp(
             summary=dict(live_context.prefix),
             exceptions=set(live_context.dots),
             new_dot=dot,
             type_name=self.name,
-            pruned_actors=len(pruned_actors),
-            pruned_events=pruned_events,
+            pruned_actors=pruned.pruned_actors,
+            pruned_events=pruned.pruned_events,
         )
 
 
 
 def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], ClockModel]:
-    if clock_name in {"vv", "vector"}:
+    if clock_name in {"vv", "vv_client", "vector"}:
         return VersionVectorModel
+    if clock_name in {"itc", "itc_client"}:
+        return IntervalTreeClockModel
     if clock_name == "dvv":
         return DottedVersionVectorModel
+    if clock_name == "dvv_client":
+        return ClientDottedVersionVectorModel
     if clock_name == "lease_dvv":
         return lambda: LeaseDottedVersionVectorModel(lease_duration=lease_duration)
+    if clock_name == "lease_dvv_client":
+        return lambda: LeaseClientDottedVersionVectorModel(lease_duration=lease_duration)
     if clock_name in {"membership_lease_dvv", "churn_aware_lease_dvv"}:
         return lambda: MembershipLeaseDottedVersionVectorModel(lease_duration=lease_duration)
     raise KeyError(f"Unknown clock: {clock_name}")
@@ -376,7 +609,11 @@ def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], C
 
 CLOCK_FACTORIES: dict[str, Callable[[], ClockModel]] = {
     "dvv": DottedVersionVectorModel,
+    "dvv_client": ClientDottedVersionVectorModel,
+    "itc": IntervalTreeClockModel,
+    "itc_client": IntervalTreeClockModel,
     "lease_dvv": lambda: LeaseDottedVersionVectorModel(lease_duration=60.0),
+    "lease_dvv_client": lambda: LeaseClientDottedVersionVectorModel(lease_duration=60.0),
     "membership_lease_dvv": lambda: MembershipLeaseDottedVersionVectorModel(lease_duration=60.0),
     "vector": VersionVectorModel,
     "vv": VersionVectorModel,

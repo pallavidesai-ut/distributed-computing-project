@@ -312,6 +312,12 @@ def analyze_replica_state(
                 "avg_hot_key_siblings": parse_float(row["avg_hot_key_siblings"]),
                 "max_hot_key_siblings": parse_int(row["max_hot_key_siblings"]),
                 "avg_metadata_bytes": parse_float(row["avg_metadata_bytes"]),
+                "avg_sibling_set_metadata_bytes": parse_float(
+                    row.get("avg_sibling_set_metadata_bytes", row["avg_metadata_bytes"])
+                ),
+                "avg_sibling_set_metadata_components": parse_float(
+                    row.get("avg_sibling_set_metadata_components", "0")
+                ),
                 "avg_stale_actor_fraction": parse_float(row["avg_stale_actor_fraction"]),
             }
         )
@@ -344,31 +350,86 @@ def analyze_replica_state(
             safe_mean([parse_float(row["avg_stale_actor_fraction"]) for row in snapshots]),
             4,
         ),
+        "avg_sibling_set_metadata_bytes": round(
+            safe_mean(
+                [
+                    parse_float(
+                        row.get(
+                            "avg_sibling_set_metadata_bytes",
+                            row["avg_metadata_bytes"],
+                        )
+                    )
+                    for row in snapshots
+                ]
+            ),
+            3,
+        ),
+        "avg_sibling_set_metadata_components": round(
+            safe_mean(
+                [
+                    parse_float(row.get("avg_sibling_set_metadata_components", "0"))
+                    for row in snapshots
+                ]
+            ),
+            3,
+        ),
     }
 
 
-def analyze_latency(
-    deliveries: list[dict[str, str]],
+def analyze_latency_with_prefix(
+    rows: list[dict[str, str]],
     output_dir: Path,
+    *,
+    prefix: str,
+    title: str,
+    x_label: str,
 ) -> dict[str, object]:
-    latencies = [parse_float(row["latency"]) for row in deliveries]
+    latencies = [parse_float(row["latency"]) for row in rows]
     stats = {
         "avg_latency": round(safe_mean(latencies), 3),
+        "median_latency": round(percentile(latencies, 0.50), 3),
         "latency_p95": round(percentile(latencies, 0.95), 3),
         "latency_p99": round(percentile(latencies, 0.99), 3),
         "max_latency": round(max(latencies, default=0.0), 3),
     }
-    write_csv(output_dir / "latency_summary.csv", [stats])
+    output_prefix = output_dir / f"{prefix}_"
+    write_csv(output_prefix.with_name(f"{output_prefix.name}summary.csv"), [stats])
+    if not rows:
+        return stats
+    write_csv(output_dir / f"{prefix}_latency_details.csv", rows)
     if latencies:
         plt.figure(figsize=(9, 5))
         plt.hist(latencies, bins=30, edgecolor="black")
-        plt.xlabel("Replication latency")
+        plt.xlabel(f"{x_label} (sim time units)")
         plt.ylabel("Count")
-        plt.title("Replication Latency Distribution")
+        plt.title(title)
         plt.tight_layout()
-        plt.savefig(output_dir / "latency_distribution.png", dpi=150)
+        plt.savefig(output_prefix.with_name(f"{output_prefix.name}distribution.png"), dpi=150)
         plt.close()
     return stats
+
+
+def analyze_replication_latency(deliveries: list[dict[str, str]], output_dir: Path) -> dict[str, object]:
+    return analyze_latency_with_prefix(
+        deliveries,
+        output_dir=output_dir,
+        prefix="replication",
+        title="Replication Latency Distribution",
+        x_label="Replication latency",
+    )
+
+
+def analyze_client_latency(
+    client_latencies: list[dict[str, str]],
+    output_dir: Path,
+) -> dict[str, object]:
+    return analyze_latency_with_prefix(
+        client_latencies,
+        output_dir=output_dir,
+        prefix="client_write",
+        title="Client-Visible Write Latency Distribution",
+        x_label="Client-visible write latency",
+    )
 
 
 def build_report_table(sections: dict[str, dict[str, object]], output_dir: Path) -> None:
@@ -388,6 +449,8 @@ def analyze_run(
     output_dir: Path,
 ) -> dict[str, dict[str, object]]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    latency_output_dir = output_dir / "latency"
+    latency_output_dir.mkdir(parents=True, exist_ok=True)
     writes = load_csv(input_dir / f"{run_name}_writes.csv")
     deliveries = load_csv(input_dir / f"{run_name}_deliveries.csv")
     decisions = load_csv(input_dir / f"{run_name}_decisions.csv")
@@ -395,6 +458,7 @@ def analyze_run(
     joins = load_csv(input_dir / f"{run_name}_joins.csv")
     leaves = load_csv(input_dir / f"{run_name}_leaves.csv")
     accuracy = load_csv(input_dir / f"{run_name}_accuracy.csv")
+    client_latencies = load_csv(input_dir / f"{run_name}_client_latencies.csv")
 
     sections = {
         "churn": analyze_churn(joins, leaves, snapshots, window, output_dir),
@@ -402,7 +466,8 @@ def analyze_run(
         "accuracy": analyze_accuracy(accuracy, window, output_dir),
         "decision_quality": analyze_decision_quality(decisions, window, output_dir),
         "replica_state": analyze_replica_state(snapshots, output_dir),
-        "latency": analyze_latency(deliveries, output_dir),
+        "replication_latency": analyze_replication_latency(deliveries, latency_output_dir),
+        "client_latency": analyze_client_latency(client_latencies, latency_output_dir),
     }
     build_report_table(sections, output_dir)
     return sections
