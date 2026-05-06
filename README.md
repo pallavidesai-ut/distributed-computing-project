@@ -50,13 +50,5 @@ scripts/reproduce_extremes.sh      # stress scenarios that amplify clock differe
 scripts/reproduce_final.sh configs/membership_lease_study.yaml
 ```
 
-## Study Notes
-
-- Design summary: [docs/clock_study_design.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/clock_study_design.md)
-- Assumptions and open questions: [docs/assumptions_and_questions.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/assumptions_and_questions.md)
-- Simulator evolution log: [docs/simulator_evolution.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/simulator_evolution.md)
-- Simulator methodology: [docs/simulator_methodology.md](docs/simulator_methodology.md)
-- Paper plan: [docs/paper_plan.md](docs/paper_plan.md)
-- Results workflow: [docs/results_workflow.md](docs/results_workflow.md)
-- Draft report: [docs/report_draft.tex](docs/report_draft.tex)
-- Proposal and pivot notes: [docs/DC Project Proposal.md](/Users/nelly/Projects/ut_austin/spring_2026/distributed computing/distributed-computing-project/docs/DC%20Project%20Proposal.md)
+# TODO
+Merge all results and test runner from scratch
