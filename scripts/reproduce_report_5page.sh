@@ -6,7 +6,7 @@ set -euo pipefail
 # Default design:
 #   - physical actor domain
 #   - stable/low/sustained/burst churn profiles
-#   - exact VV, exact DVV, and lease-DVV
+#   - exact VV, exact DVV, fixed lease-DVV, and adaptive lease-DVV
 #   - lease durations 8/16/32
 #   - five seeds
 #
@@ -43,7 +43,7 @@ echo "  jobs: $JOBS"
 
 scripts/reproduce_final.sh "$CONFIG_PATH" \
   --profiles stable low sustained burst \
-  --clocks vv dvv lease_dvv \
+  --clocks vv dvv lease_dvv adaptive_lease_dvv \
   --actor-domain physical \
   --seeds 1 2 3 4 5 \
   --sim-time "$SIM_TIME" \

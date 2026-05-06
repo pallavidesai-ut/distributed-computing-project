@@ -271,13 +271,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ancestor-counter", type=int, default=1)
     parser.add_argument("--output-dir", default="output/experiments")
     parser.add_argument("--experiment-name", default="dvv_shared_context_advantage")
+    parser.add_argument(
+        "--run-stamp",
+        default=None,
+        help="Optional timestamp/prefix for reproducible experiment directory names.",
+    )
     parser.add_argument("--write-pdf", action="store_true")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = args.run_stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_dir = Path(args.output_dir) / f"{timestamp}_{args.experiment_name}"
     aggregate_dir = experiment_dir / "aggregate"
     figures_dir = experiment_dir / "figures"
@@ -290,6 +295,7 @@ def main() -> None:
         "ancestor_counter": args.ancestor_counter,
         "output_dir": args.output_dir,
         "experiment_name": args.experiment_name,
+        "run_stamp": args.run_stamp,
         "write_pdf": args.write_pdf,
     }
     (config_dir / "experiment_config.json").write_text(json.dumps(config, indent=2))

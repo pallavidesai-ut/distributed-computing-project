@@ -111,6 +111,15 @@ def analyze_churn(
         leave_count = len(leave_buckets.get(bucket, []))
         samples = snapshot_buckets.get(bucket, [])
         avg_active_nodes = safe_mean([parse_int(row["active_nodes"]) for row in samples])
+        configured_join_rate = safe_mean(
+            [parse_float(row.get("configured_join_rate", "0")) for row in samples]
+        )
+        configured_leave_rate = safe_mean(
+            [parse_float(row.get("configured_leave_rate", "0")) for row in samples]
+        )
+        configured_churn_rate = safe_mean(
+            [parse_float(row.get("configured_churn_rate", "0")) for row in samples]
+        )
         rows.append(
             {
                 "window_start": bucket * window,
@@ -118,6 +127,9 @@ def analyze_churn(
                 "leave_count": leave_count,
                 "total_churn": join_count + leave_count,
                 "avg_active_nodes": round(avg_active_nodes, 3),
+                "configured_join_rate": round(configured_join_rate, 4),
+                "configured_leave_rate": round(configured_leave_rate, 4),
+                "configured_churn_rate": round(configured_churn_rate, 4),
             }
         )
     write_csv(output_dir / "churn_over_time.csv", rows)
@@ -129,6 +141,19 @@ def analyze_churn(
         ylabel="Cluster activity",
         output_path=output_dir / "churn_over_time.png",
     )
+    if any(float(row["configured_churn_rate"]) > 0.0 for row in rows):
+        line_plot(
+            rows,
+            x_key="window_start",
+            y_specs=[
+                ("configured_join_rate", "configured join rate"),
+                ("configured_leave_rate", "configured leave rate"),
+                ("configured_churn_rate", "configured total rate"),
+            ],
+            title="Configured Churn Pressure Over Time",
+            ylabel="Churn rate",
+            output_path=output_dir / "configured_churn_rate_over_time.png",
+        )
     return {
         "total_joins": len(joins),
         "total_leaves": len(leaves),
@@ -148,6 +173,21 @@ def analyze_metadata(
         components = [parse_float(row["metadata_components"]) for row in bucket_rows_]
         actor_entries = [parse_float(row["actor_entries"]) for row in bucket_rows_]
         pruned = [parse_int(row["was_pruned"]) for row in bucket_rows_]
+        adaptive_lease_min = [
+            parse_float(row.get("adaptive_lease_min", "0"))
+            for row in bucket_rows_
+            if parse_float(row.get("adaptive_lease_avg", "0")) > 0.0
+        ]
+        adaptive_lease_avg = [
+            parse_float(row.get("adaptive_lease_avg", "0"))
+            for row in bucket_rows_
+            if parse_float(row.get("adaptive_lease_avg", "0")) > 0.0
+        ]
+        adaptive_lease_max = [
+            parse_float(row.get("adaptive_lease_max", "0"))
+            for row in bucket_rows_
+            if parse_float(row.get("adaptive_lease_avg", "0")) > 0.0
+        ]
         rows.append(
             {
                 "window_start": bucket * window,
@@ -156,6 +196,9 @@ def analyze_metadata(
                 "avg_metadata_components": round(safe_mean(components), 3),
                 "avg_actor_entries": round(safe_mean(actor_entries), 3),
                 "pruned_write_rate": round(safe_mean(pruned), 4),
+                "adaptive_lease_min": round(safe_mean(adaptive_lease_min), 3),
+                "adaptive_lease_avg": round(safe_mean(adaptive_lease_avg), 3),
+                "adaptive_lease_max": round(safe_mean(adaptive_lease_max), 3),
             }
         )
     write_csv(output_dir / "metadata_over_time.csv", rows)
@@ -170,14 +213,33 @@ def analyze_metadata(
         ylabel="Metadata",
         output_path=output_dir / "metadata_over_time.png",
     )
+    if any(float(row["adaptive_lease_avg"]) > 0.0 for row in rows):
+        line_plot(
+            rows,
+            x_key="window_start",
+            y_specs=[
+                ("adaptive_lease_min", "min lease"),
+                ("adaptive_lease_avg", "avg lease"),
+                ("adaptive_lease_max", "max lease"),
+            ],
+            title="Adaptive Lease Duration Over Time",
+            ylabel="Lease duration",
+            output_path=output_dir / "adaptive_lease_over_time.png",
+        )
     metadata_bytes = [parse_float(row["metadata_bytes"]) for row in writes]
     actor_entries = [parse_float(row["actor_entries"]) for row in writes]
     pruned = [parse_int(row["was_pruned"]) for row in writes]
+    adaptive_leases = [
+        parse_float(row.get("adaptive_lease_avg", "0"))
+        for row in writes
+        if parse_float(row.get("adaptive_lease_avg", "0")) > 0.0
+    ]
     return {
         "avg_metadata_bytes": round(safe_mean(metadata_bytes), 3),
         "p95_metadata_bytes": round(percentile(metadata_bytes, 0.95), 3),
         "avg_actor_entries": round(safe_mean(actor_entries), 3),
         "pruned_write_rate": round(safe_mean(pruned), 4),
+        "avg_adaptive_lease": round(safe_mean(adaptive_leases), 3),
     }
 
 
@@ -376,62 +438,6 @@ def analyze_replica_state(
     }
 
 
-def analyze_latency_with_prefix(
-    rows: list[dict[str, str]],
-    output_dir: Path,
-    *,
-    prefix: str,
-    title: str,
-    x_label: str,
-) -> dict[str, object]:
-    latencies = [parse_float(row["latency"]) for row in rows]
-    stats = {
-        "avg_latency": round(safe_mean(latencies), 3),
-        "median_latency": round(percentile(latencies, 0.50), 3),
-        "latency_p95": round(percentile(latencies, 0.95), 3),
-        "latency_p99": round(percentile(latencies, 0.99), 3),
-        "max_latency": round(max(latencies, default=0.0), 3),
-    }
-    output_prefix = output_dir / f"{prefix}_"
-    write_csv(output_prefix.with_name(f"{output_prefix.name}summary.csv"), [stats])
-    if not rows:
-        return stats
-    write_csv(output_dir / f"{prefix}_latency_details.csv", rows)
-    if latencies:
-        plt.figure(figsize=(9, 5))
-        plt.hist(latencies, bins=30, edgecolor="black")
-        plt.xlabel(f"{x_label} (sim time units)")
-        plt.ylabel("Count")
-        plt.title(title)
-        plt.tight_layout()
-        plt.savefig(output_prefix.with_name(f"{output_prefix.name}distribution.png"), dpi=150)
-        plt.close()
-    return stats
-
-
-def analyze_replication_latency(deliveries: list[dict[str, str]], output_dir: Path) -> dict[str, object]:
-    return analyze_latency_with_prefix(
-        deliveries,
-        output_dir=output_dir,
-        prefix="replication",
-        title="Replication Latency Distribution",
-        x_label="Replication latency",
-    )
-
-
-def analyze_client_latency(
-    client_latencies: list[dict[str, str]],
-    output_dir: Path,
-) -> dict[str, object]:
-    return analyze_latency_with_prefix(
-        client_latencies,
-        output_dir=output_dir,
-        prefix="client_write",
-        title="Client-Visible Write Latency Distribution",
-        x_label="Client-visible write latency",
-    )
-
-
 def build_report_table(sections: dict[str, dict[str, object]], output_dir: Path) -> None:
     rows = []
     for section, metrics in sections.items():
@@ -449,16 +455,12 @@ def analyze_run(
     output_dir: Path,
 ) -> dict[str, dict[str, object]]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    latency_output_dir = output_dir / "latency"
-    latency_output_dir.mkdir(parents=True, exist_ok=True)
     writes = load_csv(input_dir / f"{run_name}_writes.csv")
-    deliveries = load_csv(input_dir / f"{run_name}_deliveries.csv")
     decisions = load_csv(input_dir / f"{run_name}_decisions.csv")
     snapshots = load_csv(input_dir / f"{run_name}_snapshots.csv")
     joins = load_csv(input_dir / f"{run_name}_joins.csv")
     leaves = load_csv(input_dir / f"{run_name}_leaves.csv")
     accuracy = load_csv(input_dir / f"{run_name}_accuracy.csv")
-    client_latencies = load_csv(input_dir / f"{run_name}_client_latencies.csv")
 
     sections = {
         "churn": analyze_churn(joins, leaves, snapshots, window, output_dir),
@@ -466,8 +468,6 @@ def analyze_run(
         "accuracy": analyze_accuracy(accuracy, window, output_dir),
         "decision_quality": analyze_decision_quality(decisions, window, output_dir),
         "replica_state": analyze_replica_state(snapshots, output_dir),
-        "replication_latency": analyze_replication_latency(deliveries, latency_output_dir),
-        "client_latency": analyze_client_latency(client_latencies, latency_output_dir),
     }
     build_report_table(sections, output_dir)
     return sections

@@ -112,6 +112,7 @@ class Cluster:
         self.metrics = metrics
         self.clock_model = clock_model
         self.profile = CHURN_PROFILES[config.profile]
+        self.sim_time = config.sim_time
         self.actor_domain = config.actor_domain
         self.max_nodes = config.cluster.max_nodes
         self.min_nodes = config.cluster.min_nodes
@@ -276,7 +277,6 @@ class Cluster:
         context_versions: list[VersionRecord],
         phase: str,
         actor_id: str,
-        request_start_time: float | None = None,
     ) -> None:
         update_active_actors = getattr(self.clock_model, "update_active_actors", None)
         if update_active_actors is not None:
@@ -286,6 +286,12 @@ class Cluster:
         for version in self.clock_actor_versions[clock_actor_id][key]:
             by_id.setdefault(version.version_id, version)
         context_versions = list(by_id.values())
+        self.clock_model.update_system_state(
+            coordinator.state,
+            key=key,
+            sibling_count=len(coordinator.read(key)),
+            now=self.env.now,
+        )
         read_context = self.clock_model.build_read_context(context_versions)
         stamp = self.clock_model.issue_stamp(
             coordinator.state,
@@ -326,19 +332,10 @@ class Cluster:
             true_events=len(version.true_history),
             is_hot_key=(key == "k0"),
             target_replicas=len(targets) + 1,
+            adaptive_lease_min=coordinator.state.last_adaptive_lease_min,
+            adaptive_lease_avg=coordinator.state.last_adaptive_lease_avg,
+            adaptive_lease_max=coordinator.state.last_adaptive_lease_max,
         )
-        if request_start_time is not None:
-            self.metrics.record_client_write_latency(
-                t=self.env.now,
-                version_id=version.version_id,
-                key=key,
-                actor_id=actor_id,
-                coordinator=coordinator.id,
-                start_time=request_start_time,
-                end_time=self.env.now,
-                target_replicas=len(targets) + 1,
-                phase=phase,
-            )
 
         for target in targets:
             message = Message(
@@ -357,6 +354,7 @@ class Cluster:
             if receiver is None or not receiver.active:
                 return
             action, sibling_count_after = receiver.apply_version(message.version)
+            self.clock_model.observe_delivery_latency(receiver.state, self.env.now - message.sent_at)
             self.metrics.record_delivery(
                 t=self.env.now,
                 version_id=message.version.version_id,
@@ -378,7 +376,6 @@ class Cluster:
             if coordinator is not None:
                 key = self.choose_key()
                 client_id = self.allocate_write_actor()
-                request_start_time = self.env.now
                 target_node = coordinator
 
                 def commit() -> None:
@@ -401,7 +398,6 @@ class Cluster:
                         context_versions=read_versions,
                         phase=phase,
                         actor_id=client_id,
-                        request_start_time=request_start_time,
                     )
 
                 think = random.expovariate(1.0 / self.workload.client_think_time)
@@ -421,7 +417,6 @@ class Cluster:
                 writers = max(2, self.workload.burst_writers)
                 for _ in range(writers):
                     coordinator = anchor
-                    request_start_time = self.env.now
                     client_id = self.allocate_write_actor()
                     if random.random() > self.workload.same_coordinator_probability:
                         alternative = self.choose_node()
@@ -431,7 +426,6 @@ class Cluster:
                     def burst_write(
                         target: Node = coordinator,
                         writer_id: str = client_id,
-                        request_started: float = request_start_time,
                     ) -> None:
                         if not target.active:
                             target = self.choose_node()
@@ -443,7 +437,6 @@ class Cluster:
                             context_versions=self.context_for_client(writer_id, key, shared_context),
                             phase="burst",
                             actor_id=writer_id,
-                            request_start_time=request_started,
                         )
 
                     self.env.schedule(random.uniform(0.0, self.workload.burst_spread), burst_write)
@@ -453,14 +446,12 @@ class Cluster:
                     if target is None:
                         return
                     actor_id = self.allocate_write_actor()
-                    request_start_time = self.env.now
                     self.execute_write(
                         key=key,
                         coordinator=target,
                         context_versions=self.context_for_client(actor_id, key, target.read(key)),
                         phase="burst_merge",
                         actor_id=actor_id,
-                        request_start_time=request_start_time,
                     )
 
                 self.env.schedule(self.workload.merge_delay, merge_write)
@@ -491,6 +482,7 @@ class Cluster:
             node.bootstrap_from(random.choice(donors))
         self.nodes.append(node)
         self.metrics.record_join(node.id, self.active_count(), self.env.now)
+        self._publish_membership_change()
 
     def _remove_node(self) -> None:
         active = self.active_nodes()
@@ -499,17 +491,29 @@ class Cluster:
         victim = random.choice(active)
         victim.active = False
         self.metrics.record_leave(victim.id, self.active_count(), self.env.now)
+        self._publish_membership_change()
+
+    def _publish_membership_change(self) -> None:
+        for node in self.active_nodes():
+            self.clock_model.observe_membership_change(node.state, self.env.now)
 
     def _schedule_churn_event(self) -> None:
-        join_rate = self.profile.join_rate
-        leave_rate = self.profile.leave_rate
+        join_rate, leave_rate = self.profile.rates_at(self.env.now, self.sim_time)
         total_rate = join_rate + leave_rate
         if total_rate <= 0:
             return
         delay = random.expovariate(total_rate)
 
         def churn() -> None:
-            if random.random() < join_rate / total_rate:
+            current_join_rate, current_leave_rate = self.profile.rates_at(
+                self.env.now,
+                self.sim_time,
+            )
+            current_total_rate = current_join_rate + current_leave_rate
+            if current_total_rate <= 0:
+                self._schedule_churn_event()
+                return
+            if random.random() < current_join_rate / current_total_rate:
                 if self.active_count() < self.max_nodes:
                     self._add_node()
             else:
@@ -542,6 +546,11 @@ class Cluster:
         def snapshot() -> None:
             active = self.active_nodes()
             active_clock_actors = self.active_clock_actor_ids()
+            configured_join_rate, configured_leave_rate = self.profile.rates_at(
+                self.env.now,
+                self.sim_time,
+            )
+            configured_churn_rate = configured_join_rate + configured_leave_rate
             if not active:
                 self.metrics.record_snapshot(
                     t=self.env.now,
@@ -554,6 +563,9 @@ class Cluster:
                     avg_sibling_set_metadata_bytes=0.0,
                     avg_sibling_set_metadata_components=0.0,
                     avg_stale_actor_fraction=0.0,
+                    configured_join_rate=configured_join_rate,
+                    configured_leave_rate=configured_leave_rate,
+                    configured_churn_rate=configured_churn_rate,
                 )
             else:
                 version_counts: list[int] = []
@@ -601,6 +613,9 @@ class Cluster:
                     avg_stale_actor_fraction=sum(stale_actor_fractions) / len(stale_actor_fractions)
                     if stale_actor_fractions
                     else 0.0,
+                    configured_join_rate=configured_join_rate,
+                    configured_leave_rate=configured_leave_rate,
+                    configured_churn_rate=configured_churn_rate,
                 )
             self.env.schedule(self.sample_interval, snapshot)
 

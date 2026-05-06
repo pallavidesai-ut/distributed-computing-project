@@ -45,6 +45,20 @@ def make_cluster() -> Cluster:
     )
 
 
+def test_ramp_peak_churn_profile_rises_then_falls() -> None:
+    profile = CHURN_PROFILES["ramp_peak"]
+    start_join, start_leave = profile.rates_at(0.0, 100.0)
+    peak_join, peak_leave = profile.rates_at(50.0, 100.0)
+    end_join, end_leave = profile.rates_at(100.0, 100.0)
+
+    assert start_join < peak_join
+    assert end_join < peak_join
+    assert start_leave < peak_leave
+    assert end_leave < peak_leave
+    assert start_join == end_join
+    assert start_leave == end_leave
+
+
 def write(cluster: Cluster, key: str, context=None, actor_id="client"):
     node = cluster.active_nodes()[0]
     cluster.execute_write(

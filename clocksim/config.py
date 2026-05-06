@@ -14,6 +14,22 @@ class ChurnProfile:
     leave_rate: float = 0.0
     burst_size: int = 0
     burst_interval: float | None = None
+    rate_shape: str = "constant"
+    floor_fraction: float = 1.0
+
+    def rates_at(self, t: float, sim_time: float) -> tuple[float, float]:
+        if self.rate_shape == "constant":
+            return self.join_rate, self.leave_rate
+        if self.rate_shape == "triangle":
+            if sim_time <= 0.0:
+                shape = 1.0
+            else:
+                position = min(1.0, max(0.0, t / sim_time))
+                shape = 1.0 - abs(2.0 * position - 1.0)
+            floor = min(1.0, max(0.0, self.floor_fraction))
+            factor = floor + (1.0 - floor) * shape
+            return self.join_rate * factor, self.leave_rate * factor
+        raise ValueError(f"Unknown churn rate shape: {self.rate_shape}")
 
 
 CHURN_PROFILES: dict[str, ChurnProfile] = {
@@ -21,6 +37,12 @@ CHURN_PROFILES: dict[str, ChurnProfile] = {
     "low": ChurnProfile(join_rate=0.01, leave_rate=0.01),
     "sustained": ChurnProfile(join_rate=0.035, leave_rate=0.035),
     "burst": ChurnProfile(join_rate=0.01, leave_rate=0.01, burst_size=6, burst_interval=45.0),
+    "ramp_peak": ChurnProfile(
+        join_rate=0.08,
+        leave_rate=0.08,
+        rate_shape="triangle",
+        floor_fraction=0.15,
+    ),
 }
 
 

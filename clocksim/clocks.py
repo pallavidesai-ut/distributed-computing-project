@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -155,6 +156,15 @@ class NodeClockState:
     clock_actor_id: str | None = None
     local_counters: dict[str, int] = field(default_factory=dict)
     leases: dict[str, dict[str, float]] = field(default_factory=lambda: defaultdict(dict))
+    actor_last_seen: dict[str, dict[str, float]] = field(default_factory=lambda: defaultdict(dict))
+    actor_gap_ewma: dict[str, dict[str, float]] = field(default_factory=lambda: defaultdict(dict))
+    key_sibling_counts: dict[str, int] = field(default_factory=dict)
+    replication_latency_ewma: float = 0.0
+    membership_churn_rate_ewma: float = 0.0
+    membership_last_change_at: float | None = None
+    last_adaptive_lease_min: float = 0.0
+    last_adaptive_lease_avg: float = 0.0
+    last_adaptive_lease_max: float = 0.0
 
     @property
     def actor_id(self) -> str:
@@ -233,6 +243,22 @@ class ClockModel(ABC):
                 state.local_counters.get(key, 0),
                 stamp.dot.counter,
             )
+
+    def observe_delivery_latency(self, state: NodeClockState, latency: float) -> None:
+        return None
+
+    def update_system_state(
+        self,
+        state: NodeClockState,
+        *,
+        key: str,
+        sibling_count: int,
+        now: float,
+    ) -> None:
+        return None
+
+    def observe_membership_change(self, state: NodeClockState, now: float) -> None:
+        return None
 
     def compare_stamps(self, left: BaseStamp, right: BaseStamp) -> str:
         return compare_contexts(left.represented_context(), right.represented_context())
@@ -528,6 +554,213 @@ class LeaseDottedVersionVectorModel(DottedVersionVectorModel):
         return stamp
 
 
+class AdaptiveLeaseDottedVersionVectorModel(DottedVersionVectorModel):
+    """Approximate DVV with a local, per-actor suspicion lease.
+
+    The lease is learned from local state a real replica could observe:
+    per-actor/key arrival cadence, local sibling pressure for the key, observed
+    replication latency, and current context width as metadata pressure.
+    """
+
+    name = "adaptive_lease_dvv"
+
+    def __init__(self, lease_duration: float) -> None:
+        self.nominal_lease_duration = max(lease_duration, 0.001)
+        self.max_lease_duration = max(self.nominal_lease_duration * 2.0, 0.001)
+        self.min_lease_duration = max(self.nominal_lease_duration * 0.25, 0.001)
+        self.default_actor_gap = max(self.nominal_lease_duration * 0.5, self.min_lease_duration)
+        self.gap_alpha = 0.3
+        self.churn_alpha = 0.5
+        self.churn_decay_window = max(self.nominal_lease_duration * 0.5, 0.001)
+        self.latency_target = max(self.nominal_lease_duration * 0.25, 0.001)
+        self.churn_rate_target = max(2.0 / self.nominal_lease_duration, 0.001)
+        self.sibling_target = 8.0
+        self.metadata_actor_target = 16.0
+        self.actor_counters: dict[str, dict[str, int]] = defaultdict(dict)
+
+    def observe_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        stamp: BaseStamp,
+        now: float,
+    ) -> None:
+        super().observe_stamp(state, key, stamp, now)
+        actor = stamp.dot.actor
+        previous = state.actor_last_seen[key].get(actor)
+        if previous is not None and now > previous:
+            gap = now - previous
+            current = state.actor_gap_ewma[key].get(actor)
+            state.actor_gap_ewma[key][actor] = (
+                gap
+                if current is None
+                else self.gap_alpha * gap + (1.0 - self.gap_alpha) * current
+            )
+        state.actor_last_seen[key][actor] = now
+
+    def observe_delivery_latency(self, state: NodeClockState, latency: float) -> None:
+        alpha = 0.2
+        if state.replication_latency_ewma <= 0.0:
+            state.replication_latency_ewma = latency
+        else:
+            state.replication_latency_ewma = (
+                alpha * latency + (1.0 - alpha) * state.replication_latency_ewma
+            )
+
+    def observe_membership_change(self, state: NodeClockState, now: float) -> None:
+        previous = state.membership_last_change_at
+        if previous is not None and now > previous:
+            rate = 1.0 / max(now - previous, 0.001)
+            if state.membership_churn_rate_ewma <= 0.0:
+                state.membership_churn_rate_ewma = rate
+            else:
+                state.membership_churn_rate_ewma = (
+                    self.churn_alpha * rate
+                    + (1.0 - self.churn_alpha) * state.membership_churn_rate_ewma
+                )
+        state.membership_last_change_at = now
+
+    def update_system_state(
+        self,
+        state: NodeClockState,
+        *,
+        key: str,
+        sibling_count: int,
+        now: float,
+    ) -> None:
+        state.key_sibling_counts[key] = sibling_count
+
+    def _expected_actor_gap(self, state: NodeClockState, key: str, actor: str) -> float:
+        return max(
+            self.min_lease_duration,
+            min(
+                self.nominal_lease_duration,
+                state.actor_gap_ewma[key].get(actor, self.default_actor_gap),
+            ),
+        )
+
+    def _pressure_components(
+        self,
+        state: NodeClockState,
+        key: str,
+        read_context: CausalContext,
+        now: float,
+    ) -> tuple[float, float, float, float]:
+        sibling_pressure = min(
+            1.0,
+            state.key_sibling_counts.get(key, 0) / self.sibling_target,
+        )
+        network_uncertainty = min(
+            1.0,
+            state.replication_latency_ewma / self.latency_target,
+        )
+        churn_rate = state.membership_churn_rate_ewma
+        if state.membership_last_change_at is not None:
+            age = max(0.0, now - state.membership_last_change_at)
+            churn_rate *= math.exp(-age / self.churn_decay_window)
+        churn_pressure = min(1.0, churn_rate / self.churn_rate_target)
+        context_width = len(read_context.prefix) + len(read_context.dots)
+        metadata_pressure = min(1.0, context_width / self.metadata_actor_target)
+        return sibling_pressure, network_uncertainty, churn_pressure, metadata_pressure
+
+    def adaptive_lease_duration(
+        self,
+        state: NodeClockState,
+        key: str,
+        actor: str,
+        local_actor: str,
+        read_context: CausalContext,
+        now: float,
+    ) -> float:
+        expected_gap = self._expected_actor_gap(state, key, actor)
+        (
+            sibling_pressure,
+            network_uncertainty,
+            churn_pressure,
+            metadata_pressure,
+        ) = self._pressure_components(
+            state,
+            key,
+            read_context,
+            now,
+        )
+        delivery_slack = max(0.0, state.replication_latency_ewma)
+        retention_multiplier = (
+            1.0
+            + 0.35 * sibling_pressure
+            + 0.20 * network_uncertainty
+            + 2.50 * churn_pressure
+        )
+        metadata_multiplier = 1.0 - 0.25 * metadata_pressure
+        lease_duration = (
+            (expected_gap + delivery_slack)
+            * retention_multiplier
+            * metadata_multiplier
+        )
+        return max(
+            self.min_lease_duration,
+            min(self.max_lease_duration, lease_duration),
+        )
+
+    def issue_stamp(
+        self,
+        state: NodeClockState,
+        key: str,
+        read_context: CausalContext,
+        now: float,
+        actor_id: str,
+    ) -> BaseStamp:
+        lease_cache: dict[str, float] = {}
+
+        def actor_is_live(actor: str) -> bool:
+            if actor == actor_id:
+                return True
+            last_seen = state.actor_last_seen[key].get(actor)
+            if last_seen is None:
+                return False
+            lease_duration = self.adaptive_lease_duration(
+                state,
+                key,
+                actor,
+                actor_id,
+                read_context,
+                now,
+            )
+            lease_cache[actor] = lease_duration
+            return last_seen + lease_duration > now
+
+        pruned = prune_context(
+            read_context,
+            actor_is_live=actor_is_live,
+        )
+        if lease_cache:
+            leases = list(lease_cache.values())
+            state.last_adaptive_lease_min = min(leases)
+            state.last_adaptive_lease_avg = sum(leases) / len(leases)
+            state.last_adaptive_lease_max = max(leases)
+        else:
+            state.last_adaptive_lease_min = 0.0
+            state.last_adaptive_lease_avg = 0.0
+            state.last_adaptive_lease_max = 0.0
+        live_context = pruned.context
+        next_counter = max(
+            self.actor_counters[actor_id].get(key, 0),
+            live_context.max_counter(actor_id),
+        ) + 1
+        self.actor_counters[actor_id][key] = next_counter
+        dot = Dot(actor_id, next_counter)
+        stamp = DVVStamp(
+            summary=dict(live_context.prefix),
+            exceptions=set(live_context.dots),
+            new_dot=dot,
+            type_name=self.name,
+            pruned_actors=pruned.pruned_actors,
+            pruned_events=pruned.pruned_events,
+        )
+        self.observe_stamp(state, key, stamp, now)
+        return stamp
+
+
 class MembershipLeaseDottedVersionVectorModel(DottedVersionVectorModel):
     """DVV that prunes only actors that have left membership and aged out.
 
@@ -600,6 +833,8 @@ def make_clock_factory(clock_name: str, lease_duration: float) -> Callable[[], C
         return ClientDottedVersionVectorModel
     if clock_name == "lease_dvv":
         return lambda: LeaseDottedVersionVectorModel(lease_duration=lease_duration)
+    if clock_name in {"adaptive_lease_dvv", "risk_lease_dvv"}:
+        return lambda: AdaptiveLeaseDottedVersionVectorModel(lease_duration=lease_duration)
     if clock_name == "lease_dvv_client":
         return lambda: LeaseClientDottedVersionVectorModel(lease_duration=lease_duration)
     if clock_name in {"membership_lease_dvv", "churn_aware_lease_dvv"}:
@@ -612,10 +847,10 @@ CLOCK_FACTORIES: dict[str, Callable[[], ClockModel]] = {
     "dvv_client": ClientDottedVersionVectorModel,
     "itc": IntervalTreeClockModel,
     "itc_client": IntervalTreeClockModel,
+    "adaptive_lease_dvv": lambda: AdaptiveLeaseDottedVersionVectorModel(lease_duration=60.0),
     "lease_dvv": lambda: LeaseDottedVersionVectorModel(lease_duration=60.0),
     "lease_dvv_client": lambda: LeaseClientDottedVersionVectorModel(lease_duration=60.0),
     "membership_lease_dvv": lambda: MembershipLeaseDottedVersionVectorModel(lease_duration=60.0),
     "vector": VersionVectorModel,
     "vv": VersionVectorModel,
 }
-

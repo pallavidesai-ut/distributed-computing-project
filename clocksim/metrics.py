@@ -51,6 +51,9 @@ class WriteMetric:
     was_pruned: int
     target_replicas: int
     is_hot_key: int
+    adaptive_lease_min: float
+    adaptive_lease_avg: float
+    adaptive_lease_max: float
 
 
 @dataclass(frozen=True)
@@ -80,20 +83,6 @@ class DeliveryMetric:
 
 
 @dataclass(frozen=True)
-class ClientLatencyMetric:
-    t: float
-    version_id: str
-    key: str
-    actor_id: str
-    coordinator: str
-    start_time: float
-    end_time: float
-    latency: float
-    target_replicas: int
-    phase: str
-
-
-@dataclass(frozen=True)
 class DecisionMetric:
     t: float
     node: str
@@ -118,6 +107,9 @@ class SnapshotMetric:
     avg_sibling_set_metadata_bytes: float
     avg_sibling_set_metadata_components: float
     avg_stale_actor_fraction: float
+    configured_join_rate: float = 0.0
+    configured_leave_rate: float = 0.0
+    configured_churn_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -131,7 +123,6 @@ class MetricsCollector:
     def __init__(self) -> None:
         self.writes: list[dict[str, Any]] = []
         self.deliveries: list[dict[str, Any]] = []
-        self.client_latencies: list[dict[str, Any]] = []
         self.decisions: list[dict[str, Any]] = []
         self.snapshots: list[dict[str, Any]] = []
         self.joins: list[dict[str, Any]] = []
@@ -152,6 +143,9 @@ class MetricsCollector:
         true_events: int,
         is_hot_key: bool,
         target_replicas: int,
+        adaptive_lease_min: float = 0.0,
+        adaptive_lease_avg: float = 0.0,
+        adaptive_lease_max: float = 0.0,
     ) -> None:
         self.writes.append(
             asdict(
@@ -174,6 +168,9 @@ class MetricsCollector:
                     was_pruned=int(version.stamp.was_pruned()),
                     target_replicas=target_replicas,
                     is_hot_key=int(is_hot_key),
+                    adaptive_lease_min=round_float(adaptive_lease_min),
+                    adaptive_lease_avg=round_float(adaptive_lease_avg),
+                    adaptive_lease_max=round_float(adaptive_lease_max),
                 )
             )
         )
@@ -233,37 +230,6 @@ class MetricsCollector:
             )
         )
 
-    def record_client_write_latency(
-        self,
-        *,
-        t: float,
-        version_id: str,
-        key: str,
-        actor_id: str,
-        coordinator: str,
-        start_time: float,
-        end_time: float,
-        target_replicas: int,
-        phase: str,
-    ) -> None:
-        latency = end_time - start_time
-        self.client_latencies.append(
-            asdict(
-                ClientLatencyMetric(
-                    t=round_float(t),
-                    version_id=version_id,
-                    key=key,
-                    actor_id=actor_id,
-                    coordinator=coordinator,
-                    start_time=round_float(start_time),
-                    end_time=round_float(end_time),
-                    latency=round_float(latency),
-                    target_replicas=target_replicas,
-                    phase=phase,
-                )
-            )
-        )
-
     def record_decision(
         self,
         *,
@@ -306,6 +272,9 @@ class MetricsCollector:
         avg_sibling_set_metadata_bytes: float,
         avg_sibling_set_metadata_components: float,
         avg_stale_actor_fraction: float,
+        configured_join_rate: float = 0.0,
+        configured_leave_rate: float = 0.0,
+        configured_churn_rate: float = 0.0,
     ) -> None:
         self.snapshots.append(
             asdict(
@@ -324,6 +293,9 @@ class MetricsCollector:
                         avg_sibling_set_metadata_components
                     ),
                     avg_stale_actor_fraction=round_float(avg_stale_actor_fraction),
+                    configured_join_rate=round_float(configured_join_rate),
+                    configured_leave_rate=round_float(configured_leave_rate),
+                    configured_churn_rate=round_float(configured_churn_rate),
                 )
             )
         )
@@ -355,7 +327,6 @@ class MetricsCollector:
         for name, rows in [
             ("writes", self.writes),
             ("deliveries", self.deliveries),
-            ("client_latencies", self.client_latencies),
             ("decisions", self.decisions),
             ("snapshots", self.snapshots),
             ("joins", self.joins),
@@ -373,6 +344,11 @@ class MetricsCollector:
     def summary(self, sim_time: float) -> dict[str, Any]:
         metadata_bytes = [float(row["metadata_bytes"]) for row in self.writes]
         actor_entries = [float(row["actor_entries"]) for row in self.writes]
+        adaptive_lease_avg = [
+            float(row.get("adaptive_lease_avg", 0.0))
+            for row in self.writes
+            if float(row.get("adaptive_lease_avg", 0.0)) > 0.0
+        ]
         precision = [float(row["precision"]) for row in self.accuracy]
         recall = [float(row["recall"]) for row in self.accuracy]
         stale_actor_fraction = [
@@ -394,7 +370,6 @@ class MetricsCollector:
         hot_siblings = [float(row["avg_hot_key_siblings"]) for row in self.snapshots]
         versions_per_key = [float(row["avg_versions_per_key"]) for row in self.snapshots]
         latency = [float(row["latency"]) for row in self.deliveries]
-        client_latency = [float(row["latency"]) for row in self.client_latencies]
         pruned_writes = sum(int(row["was_pruned"]) for row in self.writes)
 
         conflict_pairs = [
@@ -424,6 +399,12 @@ class MetricsCollector:
             if metadata_bytes
             else 0.0,
             "p95_metadata_bytes": round_float(percentile(metadata_bytes, 0.95), 3),
+            "avg_adaptive_lease": round_float(
+                sum(adaptive_lease_avg) / len(adaptive_lease_avg),
+                3,
+            )
+            if adaptive_lease_avg
+            else 0.0,
             "avg_actor_entries": round_float(sum(actor_entries) / len(actor_entries), 3)
             if actor_entries
             else 0.0,
@@ -460,18 +441,6 @@ class MetricsCollector:
             else 0.0,
             "avg_latency": round_float(sum(latency) / len(latency), 3) if latency else 0.0,
             "latency_p95": round_float(percentile(latency, 0.95), 3),
-            "median_latency": round_float(percentile(latency, 0.50), 3) if latency else 0.0,
-            "p99_latency": round_float(percentile(latency, 0.99), 3),
-            "max_latency": round_float(max(latency), 3) if latency else 0.0,
-            "avg_client_write_latency": round_float(sum(client_latency) / len(client_latency), 3)
-            if client_latency
-            else 0.0,
-            "median_client_write_latency": round_float(percentile(client_latency, 0.50), 3)
-            if client_latency
-            else 0.0,
-            "p95_client_write_latency": round_float(percentile(client_latency, 0.95), 3),
-            "p99_client_write_latency": round_float(percentile(client_latency, 0.99), 3),
-            "max_client_write_latency": round_float(max(client_latency), 3) if client_latency else 0.0,
             "pruned_write_rate": round_float(pruned_writes / len(self.writes), 4)
             if self.writes
             else 0.0,

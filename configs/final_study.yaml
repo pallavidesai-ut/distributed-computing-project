@@ -5,6 +5,7 @@ clocks:
   - vv
   - dvv
   - lease_dvv
+  - adaptive_lease_dvv
 
 profiles:
   - stable

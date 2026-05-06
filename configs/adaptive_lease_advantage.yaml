@@ -1,0 +1,71 @@
+# Adaptive Lease-DVV advantage scenario.
+#
+# Purpose:
+# - Produce a simple, readable three-bar comparison:
+#   exact DVV, fixed lease-DVV, and adaptive lease-DVV.
+# - The intended comparison is not "adaptive beats exact DVV"; exact DVV keeps
+#   full ancestry. The adaptive point should show what changes when the lease
+#   duration is recomputed dynamically per actor/key instead of being a uniform
+#   timeout for all causal entries.
+#
+# Workload shape:
+# - Physical actors and ramp-peak churn create stale actor history.
+# - Churn gradually rises, peaks around the middle of the run, then falls. This
+#   gives the adaptive lease a changing pressure signal instead of a static
+#   timeout comparison.
+# - A mixed hot/cold key distribution creates two risk classes:
+#   hot sibling-heavy objects where pruning is expensive, and quiet objects
+#   where old actor entries are usually low value.
+# - Moderate replication latency leaves room for observed churn pressure to drive
+#   most of the adaptive lease movement.
+#
+# Suggested read:
+#   scripts/reproduce_final.sh configs/adaptive_lease_advantage.yaml --jobs 4 --progress --write-pdf
+#
+# In the aggregate tables/plots, compare adaptive_lease_dvv directly against
+# lease_dvv. Both use --lease-duration 32. Fixed lease-DVV applies that timeout
+# uniformly, while adaptive lease-DVV treats it as a nominal budget: it can
+# contract below 32 during quiet periods and extend above 32 during high churn,
+# high sibling pressure, or high latency. Keeping one profile and one lease point
+# avoids the crowded multi-line ablation plot.
+
+clocks:
+  - dvv
+  - lease_dvv
+  - adaptive_lease_dvv
+
+profiles:
+  - ramp_peak
+
+actor-domain: physical
+
+seeds:
+  - 1
+  - 2
+  - 3
+
+sim-time: 240.0
+initial-size: 14
+write-interval: 3.0
+client-think-time: 2.0
+merge-probability: 0.45
+burst-interval: 10.0
+burst-writers: 10
+burst-spread: 1.5
+merge-delay: 12.0
+same-coordinator-probability: 0.55
+max-nodes: 40
+min-nodes: 4
+min-lat: 1.0
+max-lat: 3.0
+key-count: 96
+hot-key-probability: 0.2
+client-count: 512
+replication-factor: 5
+sample-interval: 6.0
+lease-duration: 32.0
+lease-durations:
+  - 32.0
+analysis-window: 12.0
+output-dir: output/experiments
+experiment-name: adaptive_lease_advantage

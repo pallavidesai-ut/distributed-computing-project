@@ -3,6 +3,7 @@ from __future__ import annotations
 from clocksim import (
     CausalContext,
     Dot,
+    AdaptiveLeaseDottedVersionVectorModel,
     ClientDottedVersionVectorModel,
     DottedVersionVectorModel,
     LeaseClientDottedVersionVectorModel,
@@ -164,3 +165,66 @@ def test_shorter_lease_prunes_at_least_as_much_as_longer_lease() -> None:
     assert short_stamp.metadata_component_count() <= long_stamp.metadata_component_count()
     assert not short_stamp.represented_context().contains(Dot("n2", 4))
     assert long_stamp.represented_context().contains(Dot("n2", 4))
+
+
+def test_adaptive_lease_dvv_prunes_stale_low_risk_actor_history() -> None:
+    model = AdaptiveLeaseDottedVersionVectorModel(lease_duration=10.0)
+    state = model.make_state("n1")
+    state.actor_last_seen["k0"]["stale"] = 0.0
+    state.key_sibling_counts["k0"] = 0
+    read_context = CausalContext(prefix={"stale": 4})
+
+    stamp = model.issue_stamp(state, "k0", read_context, now=100.0, actor_id="fresh")
+
+    assert stamp.was_pruned()
+    assert not stamp.represented_context().contains(Dot("stale", 4))
+
+
+def test_adaptive_lease_dvv_extends_recent_high_pressure_actor_history() -> None:
+    model = AdaptiveLeaseDottedVersionVectorModel(lease_duration=10.0)
+    state = model.make_state("n1")
+    state.actor_last_seen["k0"]["recent"] = 8.0
+    state.key_sibling_counts["k0"] = 8
+    state.replication_latency_ewma = 3.0
+    read_context = CausalContext(prefix={"recent": 4})
+
+    stamp = model.issue_stamp(state, "k0", read_context, now=12.0, actor_id="fresh")
+
+    assert not stamp.was_pruned()
+    assert stamp.represented_context().contains(Dot("recent", 4))
+
+
+def test_adaptive_lease_dvv_uses_per_actor_observed_cadence() -> None:
+    model = AdaptiveLeaseDottedVersionVectorModel(lease_duration=100.0)
+    state = model.make_state("n1")
+    state.actor_last_seen["k0"].update({"fast": 100.0, "slow": 100.0})
+    state.actor_gap_ewma["k0"].update({"fast": 5.0, "slow": 30.0})
+    read_context = CausalContext(prefix={"fast": 3, "slow": 3})
+
+    stamp = model.issue_stamp(state, "k0", read_context, now=125.0, actor_id="fresh")
+    represented = stamp.represented_context()
+
+    assert stamp.was_pruned()
+    assert not represented.contains(Dot("fast", 3))
+    assert represented.contains(Dot("slow", 3))
+
+
+def test_adaptive_lease_dvv_churn_pressure_extends_above_nominal_lease() -> None:
+    model = AdaptiveLeaseDottedVersionVectorModel(lease_duration=32.0)
+    state = model.make_state("n1")
+    state.actor_last_seen["k0"]["actor"] = 10.0
+    state.actor_gap_ewma["k0"]["actor"] = 16.0
+    state.membership_churn_rate_ewma = model.churn_rate_target
+    state.membership_last_change_at = 12.0
+    read_context = CausalContext(prefix={"actor": 3})
+
+    lease = model.adaptive_lease_duration(
+        state,
+        "k0",
+        "actor",
+        "fresh",
+        read_context,
+        now=12.0,
+    )
+
+    assert lease > model.nominal_lease_duration

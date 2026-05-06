@@ -20,6 +20,7 @@ WRITE_PDF = False
 from analyze_run import analyze_run
 from clocksim import (
     CLOCK_FACTORIES,
+    CHURN_PROFILES,
     add_scenario_args,
     make_clock_factory,
     run_scenario,
@@ -66,6 +67,32 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * pct
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return ordered[low]
+    weight = rank - low
+    return ordered[low] * (1 - weight) + ordered[high] * weight
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
 def sample_stderr(values: list[float]) -> float:
     if len(values) <= 1:
         return 0.0
@@ -88,7 +115,12 @@ def lease_duration_label(lease_duration: float) -> str:
 
 
 def is_lease_clock(clock: str) -> bool:
-    return clock in {"lease_dvv", "lease_dvv_client", "membership_lease_dvv"}
+    return clock in {
+        "adaptive_lease_dvv",
+        "lease_dvv",
+        "lease_dvv_client",
+        "membership_lease_dvv",
+    }
 
 
 OBJECT_METADATA_KEY = "replica_state.avg_sibling_set_metadata_bytes"
@@ -209,17 +241,24 @@ def aggregate_time_series(
     relative_csv: str,
     x_key: str,
     y_key: str,
+    positive_only: bool = False,
+    group_by_clock: bool = True,
 ) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str, float], list[float]] = {}
     for row in run_rows:
         analysis_dir = Path(str(row["analysis_dir"]))
         for point in load_csv(analysis_dir / relative_csv):
+            if y_key not in point:
+                continue
+            y_value = float(point[y_key])
+            if positive_only and y_value <= 0.0:
+                continue
             key = (
                 str(row["profile"]),
-                str(row["clock"]),
+                str(row["clock"]) if group_by_clock else "configured",
                 float(point[x_key]),
             )
-            grouped.setdefault(key, []).append(float(point[y_key]))
+            grouped.setdefault(key, []).append(y_value)
 
     aggregated: list[dict[str, object]] = []
     for (profile, clock, x_value), values in sorted(grouped.items()):
@@ -243,6 +282,38 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
             "metadata_bytes_over_time_report.png",
             "Average metadata bytes",
             "Metadata bytes over time",
+            False,
+            True,
+        ),
+        (
+            "metadata_over_time.csv",
+            "window_start",
+            "adaptive_lease_avg",
+            "adaptive_lease_over_time_report.png",
+            "Average adaptive lease",
+            "Adaptive lease duration over time",
+            True,
+            True,
+        ),
+        (
+            "churn_over_time.csv",
+            "window_start",
+            "configured_churn_rate",
+            "configured_churn_rate_over_time_report.png",
+            "Configured churn rate",
+            "Configured churn pressure over time",
+            True,
+            False,
+        ),
+        (
+            "churn_over_time.csv",
+            "window_start",
+            "total_churn",
+            "observed_churn_events_over_time_report.png",
+            "Observed churn events",
+            "Observed churn events over time",
+            False,
+            True,
         ),
         (
             "accuracy_over_time.csv",
@@ -251,6 +322,8 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
             "recall_over_time_report.png",
             "Average recall",
             "History recall over time",
+            False,
+            True,
         ),
         (
             "decision_quality_over_time.csv",
@@ -259,6 +332,8 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
             "missed_conflicts_over_time_report.png",
             "Missed conflict rate",
             "Missed conflicts over time",
+            False,
+            True,
         ),
         (
             "replica_state_over_time.csv",
@@ -267,6 +342,8 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
             "hot_key_siblings_over_time_report.png",
             "Average hot-key siblings",
             "Hot-key sibling count over time",
+            False,
+            True,
         ),
     ]
     time_series_dir = output_dir / "time_series_report"
@@ -274,8 +351,15 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
     profiles = sorted({str(row["profile"]) for row in run_rows})
     clocks = sorted({str(row["clock"]) for row in run_rows})
 
-    for relative_csv, x_key, y_key, filename, ylabel, title in specs:
-        aggregated = aggregate_time_series(run_rows, relative_csv=relative_csv, x_key=x_key, y_key=y_key)
+    for relative_csv, x_key, y_key, filename, ylabel, title, positive_only, group_by_clock in specs:
+        aggregated = aggregate_time_series(
+            run_rows,
+            relative_csv=relative_csv,
+            x_key=x_key,
+            y_key=y_key,
+            positive_only=positive_only,
+            group_by_clock=group_by_clock,
+        )
         if not aggregated:
             continue
         write_csv(time_series_dir / filename.replace(".png", ".csv"), aggregated)
@@ -285,9 +369,10 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
             axes = [axes]
 
         plotted = False
+        plot_clocks = clocks if group_by_clock else sorted({str(row["clock"]) for row in aggregated})
         for axis, profile in zip(axes, profiles):
             profile_rows = [row for row in aggregated if str(row["profile"]) == profile]
-            for clock in clocks:
+            for clock in plot_clocks:
                 clock_rows = [row for row in profile_rows if str(row["clock"]) == clock]
                 if not clock_rows:
                     continue
@@ -307,7 +392,7 @@ def write_time_series_report_plots(run_rows: list[dict[str, object]], output_dir
             plt.close(fig)
             continue
 
-        axes[0].legend(ncol=min(4, len(clocks)))
+        axes[0].legend(ncol=min(4, len(plot_clocks)))
         axes[-1].set_xlabel("Simulation time")
         fig.suptitle(title)
         fig.tight_layout()
@@ -480,6 +565,41 @@ def make_headline_table(rows: list[dict[str, object]], output_dir: Path) -> None
     write_csv(output_dir / "headline_results.csv", table)
 
 
+def make_metadata_profile_summary(rows: list[dict[str, object]], output_dir: Path) -> None:
+    if not rows:
+        return
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault((str(row["profile"]), str(row["clock"])), []).append(row)
+
+    percentiles = [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)]
+    metric_keys = [
+        WRITE_STAMP_METADATA_KEY,
+        OBJECT_METADATA_KEY,
+        "accuracy.avg_recall",
+    ]
+
+    summary: list[dict[str, object]] = []
+    for (profile, clock) in sorted(grouped):
+        group = grouped[(profile, clock)]
+        record: dict[str, object] = {
+            "profile": profile,
+            "clock": clock,
+            "num_runs": len(group),
+        }
+        for metric_key in metric_keys:
+            values: list[float] = [_as_float(row.get(metric_key)) for row in group if _as_float(row.get(metric_key)) is not None]
+            metric_values: list[float] = [value for value in values if value is not None]
+            record[f"{metric_key.replace('.', '_')}_mean"] = round(mean(metric_values), 4) if metric_values else 0.0
+            for percentile_name, pct in percentiles:
+                record[f"{metric_key.replace('.', '_')}_{percentile_name}"] = (
+                    round(percentile(metric_values, pct), 4) if metric_values else 0.0
+                )
+        summary.append(record)
+
+    write_csv(output_dir / "metadata_profile_summary.csv", summary)
+
+
 def make_failure_mode_outputs(rows: list[dict[str, object]], output_dir: Path) -> None:
     table: list[dict[str, object]] = []
     for row in rows:
@@ -518,25 +638,52 @@ def make_failure_mode_outputs(rows: list[dict[str, object]], output_dir: Path) -
 
 def make_pareto_plot(rows: list[dict[str, object]], output_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
+    clock_colors = {
+        clock: color
+        for clock, color in zip(
+            sorted({str(row["clock"]) for row in rows}),
+            plt.rcParams["axes.prop_cycle"].by_key()["color"],
+        )
+    }
     markers = {"stable": "o", "low": "s", "sustained": "^", "burst": "D"}
+    marker_cycle = [m for m in ("o", "s", "^", "D", "v", "<", ">", "P", "X", "*")]
     plotted_labels: set[str] = set()
+    marker_overrides = {profile: marker for profile, marker in zip(sorted({str(row["profile"]) for row in rows}), marker_cycle)}
     for row in rows:
         clock = str(row["clock"])
         profile = str(row["profile"])
+        marker = marker_overrides.get(profile, markers.get(profile, markers["stable"]))
         label = clock if clock not in plotted_labels else "_nolegend_"
         ax.scatter(
             float(row.get(WRITE_STAMP_METADATA_KEY, 0.0)),
             float(row.get("accuracy.avg_recall", 0.0)),
-            marker=markers.get(profile, "o"),
+            marker=marker,
+            color=clock_colors.get(clock),
             s=55,
             label=label,
         )
         plotted_labels.add(clock)
+
+    handles, labels = ax.get_legend_handles_labels()
+    legend_entries: list[tuple[plt.Line2D, str]] = []
+    for handle, label in zip(handles, labels):
+        if label == "_nolegend_":
+            continue
+        legend_entries.append((handle, label))
+    if legend_entries:
+        ax.legend([handle for handle, _ in legend_entries], [label for _, label in legend_entries], ncol=2)
+    else:
+        plotted_profile_markers = {
+            profile for profile in {str(row["profile"]) for row in rows}
+        }
+        for profile in sorted(plotted_profile_markers):
+            ax.scatter([], [], marker=marker_overrides.get(profile, markers.get(profile, "o")), color="black", label=f"profile: {profile}")
+        ax.legend(ncol=2)
+
     ax.set_xlabel("Average metadata bytes")
     ax.set_ylabel("Average history recall")
     ax.set_title("Metadata/Recall Pareto View")
     ax.grid(alpha=0.25)
-    ax.legend(ncol=2)
     fig.tight_layout()
     save_report_figure(fig, output_dir / "metadata_recall_pareto.png")
     plt.close(fig)
@@ -547,8 +694,6 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
         (WRITE_STAMP_METADATA_KEY, "Avg metadata bytes", "Metadata Cost by Churn Profile", "metadata_bytes_vs_profile.png"),
         ("accuracy.avg_precision", "Average ancestry precision", "History Precision by Churn Profile", "precision_vs_profile.png"),
         ("accuracy.avg_recall", "Average ancestry recall", "History Recall by Churn Profile", "recall_vs_profile.png"),
-        ("replication_latency.avg_latency", "Average replication latency", "Replication Latency by Churn Profile", "replication_latency_vs_profile.png"),
-        ("client_latency.avg_latency", "Average client-visible write latency", "Client-visible Write Latency by Churn Profile", "client_write_latency_vs_profile.png"),
         ("decision_quality.missed_conflict_rate", "Missed conflict rate", "Conflict Loss by Churn Profile", "missed_conflicts_vs_profile.png"),
         ("decision_quality.stale_sibling_rate", "Stale sibling rate", "Stale Sibling Retention by Churn Profile", "stale_siblings_vs_profile.png"),
         ("replica_state.avg_hot_key_siblings", "Avg hot-key siblings", "Sibling Pressure by Churn Profile", "hot_key_siblings_vs_profile.png"),
@@ -578,7 +723,7 @@ def clock_track(clock: str) -> str:
         return "DVV"
     if clock in {"itc", "itc_client"}:
         return "Interval Tree Clock"
-    if clock.startswith("lease_dvv"):
+    if clock.startswith("lease_dvv") or clock.startswith("adaptive_lease_dvv"):
         return "Approximate DVV"
     return "Other"
 
@@ -608,6 +753,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "| DVV | Prefix summary plus explicit dots over the same configured actor domain | Full ancestry precision with compact sibling-set metadata when siblings share context | More complex representation and implementation; single-write stamps can carry summary overhead |",
         "| ITC | Interval Tree Clock identity and event trees over the configured actor domain | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
+        "| Adaptive Lease-DVV | DVV with a local risk-scored lease per actor/key entry | Spends metadata on recent actors, hot sibling sets, and high-latency periods | Heuristic can still prune useful ancestry under bad signal quality |",
         "",
         "Related alternatives worth discussing in the paper, but not implemented here, are Bounded Version Vectors and HLC-style approximate causality if the study broadens beyond exact version ancestry.",
         "",
@@ -636,7 +782,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
             "### Track Structure",
             "",
             "- Apples-to-apples exact track: compare `vv` vs `dvv` vs `itc` when selected.",
-            "- Approximate track: compare exact clocks against all `lease_dvv` variants.",
+            "- Approximate track: compare exact clocks against all lease-style DVV variants.",
             "",
         ]
     )
@@ -670,16 +816,15 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
             "- `dvv` should match `vv` on correctness while representing writes as explicit dots plus compact causal context over the same actor domain.",
             "- `replica_state.avg_sibling_set_metadata_bytes` is a secondary object/read-response metric that credits DVV-family clocks for shared sibling summaries.",
             "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over the configured actor domain; compare its tree metadata against the exact VV and DVV baselines.",
-            "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
+            "- `lease_dvv` and `adaptive_lease_dvv` are intentionally approximate. Fixed lease-DVV exposes a duration knob; adaptive lease-DVV derives its effective lease from actor recentness, sibling pressure, observed latency, and metadata pressure.",
             "",
             "## Outputs",
             "",
             "- `comparison_by_clock.csv`: aggregated metrics by churn profile and clock",
             "- `headline_results.csv`: per-write metadata headline table with sibling-set side columns",
+            "- `metadata_profile_summary.csv`: per-profile, per-clock metadata mean and percentile summary",
             "- `metadata_bytes_vs_profile.png`: headline per-write stamp metadata plot",
             "- `sibling_set_metadata_bytes_vs_profile.png`: secondary DVV shared-summary object metadata plot",
-            "- `client_write_latency_vs_profile.png`: client-visible write-latency plot",
-            "- `replication_latency_vs_profile.png`: replication-delivery-latency plot",
             "- `lease_duration_ablation.csv`: lease-DVV metadata/correctness ablation table",
             "- `time_series_report/`: profile-by-profile time-series plots",
             "- `metadata_reduction_vs_recall_loss.png`: lease-DVV tradeoff summary",
@@ -756,7 +901,7 @@ def build_parser() -> configargparse.ArgParser:
     )
     parser.add("-c", "--config", is_config_file=True, help="Path to a YAML config file.")
     parser.add("--clocks", nargs="+", choices=sorted(CLOCK_FACTORIES), default=["vv", "dvv", "lease_dvv"])
-    parser.add("--profiles", nargs="+", choices=["stable", "low", "sustained", "burst"], default=["stable", "sustained", "burst"])
+    parser.add("--profiles", nargs="+", choices=sorted(CHURN_PROFILES), default=["stable", "sustained", "burst"])
     parser.add("--seeds", nargs="+", type=int, default=[7, 17, 29])
     add_scenario_args(parser)
     parser.add("--lease-duration", type=float, default=16.0)
@@ -856,6 +1001,7 @@ def main() -> None:
     write_csv(experiment_dir / "comparison_runs.csv", run_rows)
     aggregated_rows = aggregate_runs(run_rows)
     write_csv(experiment_dir / "comparison_by_clock.csv", aggregated_rows)
+    make_metadata_profile_summary(run_rows, experiment_dir)
     make_comparison_plots(aggregated_rows, experiment_dir)
     write_time_series_report_plots(run_rows, experiment_dir)
     build_report(aggregated_rows, experiment_dir, experiment_config)
