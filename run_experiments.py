@@ -88,7 +88,7 @@ def lease_duration_label(lease_duration: float) -> str:
 
 
 def is_lease_clock(clock: str) -> bool:
-    return clock in {"lease_dvv", "lease_dvv_client", "membership_lease_dvv"}
+    return clock == "lease_dvv"
 
 
 OBJECT_METADATA_KEY = "replica_state.avg_sibling_set_metadata_bytes"
@@ -574,11 +574,9 @@ def make_comparison_plots(rows: list[dict[str, object]], output_dir: Path) -> No
 def clock_track(clock: str) -> str:
     if clock == "vv":
         return "Exact Baseline"
-    if clock in {"dvv", "dvv_client"}:
+    if clock == "dvv":
         return "DVV"
-    if clock in {"itc", "itc_client"}:
-        return "Interval Tree Clock"
-    if clock.startswith("lease_dvv"):
+    if clock == "lease_dvv":
         return "Approximate DVV"
     return "Other"
 
@@ -591,7 +589,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "",
         "## Scope",
         "",
-        "This experiment matrix compares exact VV, exact DVV, exact ITC when selected, and lease-pruned DVV under the same churn-heavy workload.",
+        "This experiment matrix compares exact VV, exact DVV, and lease-pruned DVV under the same churn-heavy workload.",
         "",
         "The simulator now separates true causal history from clock-encoded history, which makes the comparison meaningful on three axes:",
         "",
@@ -606,7 +604,6 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         "| --- | --- | --- | --- |",
         "| VV | Exact per-object vector over the configured actor domain | Full ancestry precision with the simplest semantics | Metadata grows with the number of distinct actors touching an object |",
         "| DVV | Prefix summary plus explicit dots over the same configured actor domain | Full ancestry precision with compact sibling-set metadata when siblings share context | More complex representation and implementation; single-write stamps can carry summary overhead |",
-        "| ITC | Interval Tree Clock identity and event trees over the configured actor domain | Exact dynamic-actor causality without a fixed vector dimension | More complex tree representation; metadata depends on actor allocation/history shape |",
         "| Lease-DVV | DVV with actor-expiry pruning before new writes | Cuts stale metadata aggressively under churn | Can forget old ancestry and retain stale siblings or lose recall |",
         "",
         "Related alternatives worth discussing in the paper, but not implemented here, are Bounded Version Vectors and HLC-style approximate causality if the study broadens beyond exact version ancestry.",
@@ -635,7 +632,7 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
         [
             "### Track Structure",
             "",
-            "- Apples-to-apples exact track: compare `vv` vs `dvv` vs `itc` when selected.",
+            "- Apples-to-apples exact track: compare `vv` vs `dvv` over the same actor domain.",
             "- Approximate track: compare exact clocks against all `lease_dvv` variants.",
             "",
         ]
@@ -669,7 +666,6 @@ def build_report(rows: list[dict[str, object]], output_dir: Path, experiment_con
             "- `vv` is the exact vanilla baseline for the selected actor domain. It shows the metadata cost of preserving full object ancestry with a plain vector.",
             "- `dvv` should match `vv` on correctness while representing writes as explicit dots plus compact causal context over the same actor domain.",
             "- `replica_state.avg_sibling_set_metadata_bytes` is a secondary object/read-response metric that credits DVV-family clocks for shared sibling summaries.",
-            "- `itc` is exact and uses real Interval Tree Clock fork/event/join/compare semantics over the configured actor domain; compare its tree metadata against the exact VV and DVV baselines.",
             "- `lease_dvv` is the only intentionally approximate design. Its value depends on whether the extra metadata savings over exact DVV justify the ancestry recall loss across lease durations.",
             "",
             "## Outputs",

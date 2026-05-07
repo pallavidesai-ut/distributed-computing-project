@@ -3,17 +3,14 @@ from __future__ import annotations
 from clocksim import (
     CausalContext,
     Dot,
-    ClientDottedVersionVectorModel,
     DottedVersionVectorModel,
-    LeaseClientDottedVersionVectorModel,
     LeaseDottedVersionVectorModel,
-    MembershipLeaseDottedVersionVectorModel,
     VersionVectorModel,
 )
 
 
 def test_vv_and_dvv_preserve_read_ancestry_in_same_object_chain() -> None:
-    for model in [VersionVectorModel(), DottedVersionVectorModel(), ClientDottedVersionVectorModel()]:
+    for model in [VersionVectorModel(), DottedVersionVectorModel()]:
         state = model.make_state("n1")
         first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-a")
         read_context = model.build_read_context([])
@@ -40,37 +37,6 @@ def test_dvv_uses_configured_actor_identity_supplied_by_simulator() -> None:
     assert second.dot.actor == "configured-actor"
     assert first.dot.counter == 1
     assert second.dot.counter == 2
-
-
-def test_client_dvv_uses_same_client_actor_domain_as_vv() -> None:
-    model = ClientDottedVersionVectorModel()
-    state = model.make_state("n1")
-    first = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-a")
-    second = model.issue_stamp(state, "k0", CausalContext(), now=0.0, actor_id="client-b")
-    merged = model.issue_stamp(
-        state,
-        "k0",
-        model.build_read_context([]),
-        now=1.0,
-        actor_id="client-c",
-    )
-
-    assert first.dot.actor == "client-a"
-    assert second.dot.actor == "client-b"
-    assert model.compare_stamps(first, second) == "concurrent"
-    assert merged.dot.actor == "client-c"
-
-
-def test_expired_lease_client_dvv_prunes_client_actor_history() -> None:
-    read_context = CausalContext(prefix={"client-b": 3})
-    model = LeaseClientDottedVersionVectorModel(lease_duration=1.0)
-    state = model.make_state("n1")
-
-    stamp = model.issue_stamp(state, "k0", read_context, now=10.0, actor_id="client-a")
-
-    assert stamp.dot.actor == "client-a"
-    assert stamp.was_pruned()
-    assert not stamp.represented_context().contains(Dot("client-b", 3))
 
 
 def test_lease_dvv_renews_only_dot_actor_not_transitive_context() -> None:
@@ -118,33 +84,6 @@ def test_expired_lease_dvv_prunes_metadata_and_loses_recall_shape() -> None:
     represented = pruned_stamp.represented_context().materialize()
     truth = exact_stamp.represented_context().materialize()
     assert represented < truth
-
-
-def test_membership_lease_dvv_keeps_quiet_active_actors() -> None:
-    read_context = CausalContext(prefix={"n2": 4})
-    model = MembershipLeaseDottedVersionVectorModel(lease_duration=1.0)
-    state = model.make_state("n1")
-    model.update_active_actors({"n1", "n2"}, now=0.0)
-
-    stamp = model.issue_stamp(state, "k0", read_context, now=100.0, actor_id="client-a")
-
-    assert not stamp.was_pruned()
-    assert stamp.represented_context().contains(Dot("n2", 4))
-
-
-def test_membership_lease_dvv_prunes_departed_actor_after_grace_period() -> None:
-    read_context = CausalContext(prefix={"n2": 4})
-    model = MembershipLeaseDottedVersionVectorModel(lease_duration=5.0)
-    state = model.make_state("n1")
-    model.update_active_actors({"n1", "n2"}, now=0.0)
-    model.update_active_actors({"n1"}, now=10.0)
-
-    retained = model.issue_stamp(state, "k0", read_context, now=12.0, actor_id="client-a")
-    pruned = model.issue_stamp(state, "k0", read_context, now=20.0, actor_id="client-a")
-
-    assert retained.represented_context().contains(Dot("n2", 4))
-    assert pruned.was_pruned()
-    assert not pruned.represented_context().contains(Dot("n2", 4))
 
 
 def test_shorter_lease_prunes_at_least_as_much_as_longer_lease() -> None:
