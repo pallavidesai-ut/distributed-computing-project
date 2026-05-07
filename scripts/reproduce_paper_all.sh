@@ -11,20 +11,26 @@ mkdir -p "$PAPER_DIR"
 export RUN_STAMP="$STAMP"
 export OUTPUT_DIR="$PAPER_DIR"
 
+if [[ -x ".venv/bin/python" ]]; then
+  PYTHON="${PYTHON:-.venv/bin/python}"
+else
+  PYTHON="${PYTHON:-python}"
+fi
+
 echo "Writing all final-paper experiment outputs under: $PAPER_DIR"
 
+"$PYTHON" scripts/run_dvv_advantage_experiment.py \
+  --output-dir "$PAPER_DIR" \
+  --experiment-name fanout_dvv_vs_vv
 scripts/reproduce_final.sh configs/final_study.yaml --output-dir "$PAPER_DIR" "$@"
-scripts/reproduce_sensitivity.sh --output-dir "$PAPER_DIR" "$@"
-scripts/reproduce_extremes.sh --output-dir "$PAPER_DIR" "$@"
 
 cat > "$PAPER_DIR/README.txt" <<EOF
 Final paper experiment bundle
 Generated: $STAMP
 
 Included experiment sets:
-- Main final study: configs/final_study.yaml
-- Sensitivity studies: configs/sensitivity_client_count_32.yaml, configs/sensitivity_client_count_512.yaml, configs/sensitivity_rf3.yaml, configs/sensitivity_rf5.yaml
-- Extreme and DVV fanout scenarios: configs/dvv_sibling_fanout_study.yaml, configs/extreme_hotspot_churn.yaml, configs/extreme_sparse_replication.yaml
+- Deterministic DVV shared-context fanout comparison: scripts/run_dvv_advantage_experiment.py
+- Main fixed-lease churn study: configs/final_study.yaml
 
 Each subdirectory contains its own manifest, copied config, aggregate outputs, figures, and per-run artifacts.
 EOF
